@@ -28,6 +28,10 @@ fetch() {
 }
 
 render() {
+  local cols body_w
+  cols="$(tput cols)"
+  body_w=$((cols - 74))
+  [ "$body_w" -lt 10 ] && body_w=10
   clear
   printf '%sreeds%s  %s  prefix=%s  refresh=%ss  %s%s%s\n\n' \
     "$bold" "$reset" "$(date '+%H:%M:%S')" "$PREFIX" "$INTERVAL" \
@@ -35,13 +39,13 @@ render() {
     "$status" "$reset"
   if [ -s "$buf" ]; then
     tail -n "$LINES" "$buf" | while IFS=$'\t' read -r seq ts sender kind topic body; do
-      printf '%s%4s%s  %s  %s%-10s%s %s%-12s%s %s%-28s%s %s\n' \
+      printf '%s%4.4s%s  %s  %s%-12.12s%s %s%-12.12s%s %s%-30.30s%s %.*s\n' \
         "$dim" "$seq" "$reset" \
         "$(date -r "$ts" '+%H:%M:%S')" \
         "$cyan" "$sender" "$reset" \
         "$yellow" "$kind" "$reset" \
         "$bold" "$topic" "$reset" \
-        "$(printf '%s' "$body" | cut -c1-60)"
+        "$body_w" "$body"
     done
   else
     printf '%sno whispers yet%s\n' "$dim" "$reset"
