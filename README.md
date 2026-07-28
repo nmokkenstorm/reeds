@@ -36,9 +36,22 @@ prefix.
 bin/reeds pub agents.review.api '{"verdict":"carry on"}' review.done
 bin/reeds since agents 0
 bin/reeds tail            # firehose
+bin/reeds-watch           # refreshing table for a tmux status pane
 ```
 
-Env: `REEDS_URL`, `REEDS_SENDER`.
+Env: `REEDS_URL`, `REEDS_SENDER`. `reeds-watch [prefix] [lines]` polls with a
+cursor and shows `[live]`/`[down]`.
+
+## Daemon
+
+`launchd/dev.mokkenstorm.reeds.plist` keeps the daemon running (`KeepAlive`,
+`RunAtLoad`, logs to `~/Library/Logs/reeds.log`):
+
+```sh
+cp launchd/dev.mokkenstorm.reeds.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
+launchctl kickstart -k gui/$(id -u)/dev.mokkenstorm.reeds   # restart
+```
 
 ## Sources
 

@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+REEDS_URL="${REEDS_URL:-http://localhost:7333}"
+PREFIX="${1:-*}"
+LINES="${2:-20}"
+INTERVAL=2
+
+buf="$(mktemp -t reeds-watch)"
+trap 'rm -f "$buf"' EXIT
+
+cursor=0
+status="[....]"
+
+bold="$(tput bold)" dim="$(tput dim)" reset="$(tput sgr0)"
+green="$(tput setaf 2)" red="$(tput setaf 1)" cyan="$(tput setaf 6)" yellow="$(tput setaf 3)"
+
+fetch() {
+  local resp more
+  while :; do
+    resp="$(curl -sf --max-time 3 "$REEDS_URL/t/$PREFIX?since=$cursor&limit=500")" || return 1
+    jq -r '.whispers[] | [.seq, (.ts/1000 | floor), .sender, .kind, .topic, (.body | tojson)] | @tsv' \
+      <<<"$resp" >> "$buf"
+    cursor="$(jq -r '.next_since' <<<"$resp")"
+    more="$(jq -r '.more' <<<"$resp")"
+    [ "$more" = "true" ] || break
+  done
+}
+
+render() {
+  clear
+  printf '%sreeds%s  %s  prefix=%s  refresh=%ss  %s%s%s\n\n' \
+    "$bold" "$reset" "$(date '+%H:%M:%S')" "$PREFIX" "$INTERVAL" \
+    "$([ "$status" = "[live]" ] && printf '%s' "$green" || printf '%s' "$red")" \
+    "$status" "$reset"
+  if [ -s "$buf" ]; then
+    tail -n "$LINES" "$buf" | while IFS=$'\t' read -r seq ts sender kind topic body; do
+      printf '%s%4s%s  %s  %s%-10s%s %s%-12s%s %s%-28s%s %s\n' \
+        "$dim" "$seq" "$reset" \
+        "$(date -r "$ts" '+%H:%M:%S')" \
+        "$cyan" "$sender" "$reset" \
+        "$yellow" "$kind" "$reset" \
+        "$bold" "$topic" "$reset" \
+        "$(printf '%s' "$body" | cut -c1-60)"
+    done
+  else
+    printf '%sno whispers yet%s\n' "$dim" "$reset"
+  fi
+}
+
+while :; do
+  if fetch; then
+    status="[live]"
+  else
+    status="[down]"
+  fi
+  render
+  sleep "$INTERVAL"
+done
