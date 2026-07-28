@@ -100,9 +100,13 @@ this trades away. Fetch failures at runtime are whispered on
 diff baseline, so transient upstream errors do not fabricate `gone`/`seen`
 storms.
 
-Nothing is supervised: hub and source actors are linked to main, so an actor
-crash takes the daemon down and recovery is launchd's job. That is a
-deliberate trade for a single-user local daemon.
+Everything runs under one OTP supervision tree (one-for-one): the hub is a
+named process, so a crashed hub restarts without invalidating the subject
+that sources and the HTTP layer hold, and a crashed source restarts clean
+and reloads its diff baseline on the next tick. One caveat: a hub restart
+drops the in-memory subscriber list, so SSE clients see silence until they
+reconnect; `since`-cursor pulls are unaffected. launchd remains the backstop
+for whole-VM death.
 
 New providers implement `source.Source` (a name, an interval, and a
 `poll: fn(Option(String)) -> #(Option(String), List(Draft))`) and register in

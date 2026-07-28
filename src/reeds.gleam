@@ -3,12 +3,13 @@ import gleam/erlang/process
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/otp/static_supervisor as supervisor
 import gleam/result
 import mist
 import reeds/api
 import reeds/config.{type SourceSpec}
 import reeds/hub
-import reeds/source
+import reeds/source.{type Source}
 import reeds/sources/bitbucket
 import reeds/sources/github
 import reeds/store
@@ -27,16 +28,23 @@ pub fn main() {
   let assert Ok(conn) = store.open(db_path)
   io.println("reeds: " <> db_path <> " (sqlite " <> store.version(conn) <> ")")
 
-  let assert Ok(started) = hub.start(conn)
-  let hub_subject = started.data
+  let hub_name = process.new_name("reeds_hub")
+  let hub_subject = process.named_subject(hub_name)
+  let sources = list.map(config.sources, build_source)
 
-  list.each(config.sources, start_source(_, hub_subject))
-
-  let assert Ok(_) =
+  let web =
     mist.new(api.handler(hub_subject))
     |> mist.bind("localhost")
     |> mist.port(port)
-    |> mist.start
+
+  let assert Ok(_) =
+    supervisor.new(supervisor.OneForOne)
+    |> supervisor.add(hub.supervised(conn, hub_name))
+    |> list.fold(sources, _, fn(sup, src) {
+      supervisor.add(sup, source.supervised(src, hub_subject))
+    })
+    |> supervisor.add(mist.supervised(web))
+    |> supervisor.start
   io.println("reeds: listening on http://localhost:" <> int.to_string(port))
 
   process.sleep_forever()
@@ -52,10 +60,7 @@ fn config_path() -> String {
 
 /// A source that fails validation refuses the whole boot: a daemon quietly
 /// running without a source you configured is worse than a loud crash.
-fn start_source(
-  spec: SourceSpec,
-  hub_subject: process.Subject(hub.Msg),
-) -> Nil {
+fn build_source(spec: SourceSpec) -> Source {
   let built = case spec.kind {
     "bitbucket" -> bitbucket.from_spec(spec.name, spec.table)
     "github" -> github.from_spec(spec.name, spec.table)
@@ -64,10 +69,10 @@ fn start_source(
   case built {
     Error(reason) -> panic as { "reeds: " <> reason }
     Ok(src) -> {
-      let assert Ok(_) = source.start(src, hub_subject)
       io.println(
         "reeds: source " <> spec.name <> " (" <> spec.kind <> ") polling",
       )
+      src
     }
   }
 }

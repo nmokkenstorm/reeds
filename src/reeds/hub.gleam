@@ -2,6 +2,7 @@ import gleam/erlang/process.{type Pid, type Subject}
 import gleam/list
 import gleam/option.{type Option}
 import gleam/otp/actor
+import gleam/otp/supervision
 import gleam/result
 import reeds/clock
 import reeds/store
@@ -43,6 +44,20 @@ pub fn start(
   actor.new(State(conn:, subs: []))
   |> actor.on_message(handle)
   |> actor.start
+}
+
+/// Supervised child spec under a registered name, so a restarted hub keeps
+/// answering the same named subject that sources and the API hold.
+pub fn supervised(
+  conn: Connection,
+  name: process.Name(Msg),
+) -> supervision.ChildSpecification(Subject(Msg)) {
+  supervision.worker(fn() {
+    actor.new(State(conn:, subs: []))
+    |> actor.on_message(handle)
+    |> actor.named(name)
+    |> actor.start
+  })
 }
 
 fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {

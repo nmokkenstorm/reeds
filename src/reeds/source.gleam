@@ -3,6 +3,7 @@ import gleam/io
 import gleam/list
 import gleam/option.{type Option, Some}
 import gleam/otp/actor
+import gleam/otp/supervision
 import gleam/result
 import reeds/hub
 
@@ -27,6 +28,15 @@ pub opaque type Msg {
 
 type State {
   State(source: Source, hub: Subject(hub.Msg), self: Subject(Msg))
+}
+
+/// Supervised child spec: a crashed source restarts clean and reloads its
+/// diff baseline from the hub on the first tick.
+pub fn supervised(
+  source: Source,
+  hub: Subject(hub.Msg),
+) -> supervision.ChildSpecification(Subject(Msg)) {
+  supervision.worker(fn() { start(source, hub) })
 }
 
 pub fn start(
