@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REEDS_URL="${REEDS_URL:-http://localhost:7333}"
+REEDS_SENDER="${REEDS_SENDER:-$(whoami)}"
+
+cmd="${1:-help}"
+shift || true
+
+case "$cmd" in
+  pub)
+    topic="$1"
+    body="$2"
+    kind="${3:-note}"
+    curl -sf -X POST "$REEDS_URL/t/$topic" \
+      -H "x-reeds-sender: $REEDS_SENDER" \
+      -H "x-reeds-kind: $kind" \
+      -d "$body"
+    echo
+    ;;
+  since)
+    prefix="$1"
+    since="${2:-0}"
+    curl -sf "$REEDS_URL/t/$prefix?since=$since"
+    echo
+    ;;
+  tail)
+    prefix="${1:-*}"
+    since="${2:-0}"
+    curl -sfN "$REEDS_URL/t/$prefix/events?since=$since"
+    ;;
+  health)
+    curl -sf "$REEDS_URL/health"
+    echo
+    ;;
+  *)
+    cat <<'EOF'
+usage:
+  reeds pub <topic> <json> [kind]     publish a whisper
+  reeds since <prefix> [seq]          fetch whispers after seq (cursor pull)
+  reeds tail [prefix] [seq]           live SSE tail (default: everything)
+  reeds health                        daemon check
+env: REEDS_URL (default http://localhost:7333), REEDS_SENDER (default whoami)
+EOF
+    ;;
+esac
