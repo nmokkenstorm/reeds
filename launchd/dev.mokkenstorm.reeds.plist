@@ -6,8 +6,9 @@
   <string>dev.mokkenstorm.reeds</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/gleam</string>
-    <string>run</string>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>set -a; [ -f "$HOME/.config/reeds/env" ] &amp;&amp; . "$HOME/.config/reeds/env"; exec /opt/homebrew/bin/gleam run</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/Users/niels/Developer/mokkenstorm-dev/reeds</string>

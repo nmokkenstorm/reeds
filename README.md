@@ -56,12 +56,20 @@ launchctl kickstart -k gui/$(id -u)/dev.mokkenstorm.reeds   # restart
 ## Sources
 
 A source polls an upstream, diffs against its persisted state, and publishes
-the changes as whispers. The Bitbucket source watches open PRs and emits
-`pr.seen`, `pr.updated`, and `pr.gone` on `bb.pr.<repo>.<id>`; enable it with:
+the changes as whispers. The Bitbucket source watches open PRs (`pr.seen`,
+`pr.updated`, `pr.gone` on `bb.pr.<repo>.<id>`) and recent pipeline runs
+(`pipe.seen`, `pipe.updated` on `bb.pipe.<repo>.<build>`; the body carries
+state, result, and branch). Configure via env, or `~/.config/reeds/env` when
+running under the launchd agent:
 
 ```sh
-BITBUCKET_WORKSPACE=... BITBUCKET_REPOS=slug-a,slug-b BITBUCKET_TOKEN=... gleam run
+BITBUCKET_WORKSPACE=...            # workspace slug
+BITBUCKET_REPOS=slug-a,slug-b
+BITBUCKET_TOKEN=...                # workspace/repo access token (Bearer)
+BITBUCKET_EMAIL=...                # set only for Atlassian API tokens (Basic)
 ```
+
+Fetch failures are whispered on `reeds.source.bitbucket` with kind `error`.
 
 New providers implement `source.Source` (a name, an interval, and a
 `poll: fn(Option(String)) -> #(Option(String), List(Draft))`) and register in

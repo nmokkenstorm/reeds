@@ -1,8 +1,10 @@
 import gleam/erlang/process
+import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleeunit
 import reeds/hub
+import reeds/sources/bitbucket.{Pipeline, Pr}
 import reeds/store
 import reeds/whisper.{Whisper}
 
@@ -124,6 +126,25 @@ pub fn source_state_test() {
     store.put_source_state(conn, "bitbucket", "{\"a\":\"2\"}")
   let assert Ok(Some("{\"a\":\"2\"}")) =
     store.get_source_state(conn, "bitbucket")
+}
+
+pub fn prs_decoder_test() {
+  let fixture =
+    "{\"values\":[{\"id\":12,\"title\":\"fix the thing\",\"state\":\"OPEN\",\"updated_on\":\"2026-07-28T10:00:00Z\",\"unrelated\":true}]}"
+  let assert Ok([Pr(12, "fix the thing", "OPEN", "2026-07-28T10:00:00Z")]) =
+    json.parse(from: fixture, using: bitbucket.prs_decoder())
+}
+
+pub fn pipelines_decoder_test() {
+  let fixture =
+    "{\"values\":["
+    <> "{\"build_number\":512,\"state\":{\"name\":\"COMPLETED\",\"result\":{\"name\":\"SUCCESSFUL\"}},\"target\":{\"ref_name\":\"main\"}},"
+    <> "{\"build_number\":513,\"state\":{\"name\":\"IN_PROGRESS\"},\"target\":{}}"
+    <> "]}"
+  let assert Ok([
+    Pipeline(512, "COMPLETED", "SUCCESSFUL", "main"),
+    Pipeline(513, "IN_PROGRESS", "", ""),
+  ]) = json.parse(from: fixture, using: bitbucket.pipelines_decoder())
 }
 
 pub fn hub_publish_subscribe_test() {
