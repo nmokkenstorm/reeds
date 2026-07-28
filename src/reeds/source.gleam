@@ -54,24 +54,29 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
       _,
     ))
   let #(next, drafts) = source.poll(previous)
-  list.each(drafts, fn(draft) {
-    process.call(state.hub, waiting: 5000, sending: hub.Publish(
-      draft.topic,
-      source.name,
-      draft.kind,
-      draft.body,
-      _,
-    ))
-    |> result.map_error(fn(error) {
-      io.println(
-        "reeds: source " <> source.name <> " publish failed: " <> error,
-      )
+  let published =
+    list.fold(drafts, True, fn(all_ok, draft) {
+      process.call(state.hub, waiting: 5000, sending: hub.Publish(
+        draft.topic,
+        source.name,
+        draft.kind,
+        draft.body,
+        _,
+      ))
+      |> result.map_error(fn(error) {
+        io.println(
+          "reeds: source " <> source.name <> " publish failed: " <> error,
+        )
+      })
+      |> result.is_ok
+      && all_ok
     })
-  })
-  case next {
-    Some(next_state) ->
+  // A failed publish keeps the old baseline, so the drafts are rebuilt and
+  // retried next poll instead of being lost forever.
+  case next, published {
+    Some(next_state), True ->
       process.send(state.hub, hub.PutSourceState(source.name, next_state))
-    option.None -> Nil
+    _, _ -> Nil
   }
   process.send_after(state.self, source.interval_ms, Tick)
   actor.continue(state)

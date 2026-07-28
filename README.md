@@ -55,21 +55,54 @@ launchctl kickstart -k gui/$(id -u)/dev.mokkenstorm.reeds   # restart
 
 ## Sources
 
-A source polls an upstream, diffs against its persisted state, and publishes
-the changes as whispers. The Bitbucket source watches open PRs (`pr.seen`,
-`pr.updated`, `pr.gone` on `bb.pr.<repo>.<id>`) and recent pipeline runs
-(`pipe.seen`, `pipe.updated` on `bb.pipe.<repo>.<build>`; the body carries
-state, result, and branch). Configure via env, or `~/.config/reeds/env` when
-running under the launchd agent:
+A source polls an upstream, diffs against its persisted fingerprint state,
+and publishes the changes as whispers. Two providers ship today, both built
+on the shared poller (`sources/poller.gleam`):
 
-```sh
-BITBUCKET_WORKSPACE=...            # workspace slug
-BITBUCKET_REPOS=slug-a,slug-b
-BITBUCKET_TOKEN=...                # workspace/repo access token (Bearer)
-BITBUCKET_EMAIL=...                # set only for Atlassian API tokens (Basic)
+- `kind = "bitbucket"`: open PRs (`pr.seen` / `pr.updated` / `pr.gone` on
+  `bb.pr.<repo>.<id>`) and recent pipeline runs (`pipe.seen` / `pipe.updated`
+  on `bb.pipe.<repo>.<build>`). Needs `workspace`; `email` switches to Basic
+  auth for Atlassian API tokens.
+- `kind = "github"`: open PRs on `gh.pr.<repo>.<number>` and recent Actions
+  runs (`run.seen` / `run.updated` on `gh.run.<repo>.<run_number>`). Needs
+  `owner` and a PAT.
+
+Sources are configured in `~/.config/reeds/config.toml` (override the path
+with `REEDS_CONFIG`); each `[sources.<name>]` section is an independent
+instance with its own diff state, sender name, and credentials:
+
+```toml
+port = 7333
+db = "/absolute/path/reeds.db"
+
+[sources.work]
+kind = "bitbucket"
+workspace = "acme"
+repos = ["web", "api"]
+interval_seconds = 30            # optional, default 30, minimum 5
+token = "..."                    # or token_env = "VAR" to read from env
+# email = "..."                  # set for Atlassian API tokens (Basic auth)
+# topic_prefix = "bb"            # default ("gh" for github)
+
+[sources.personal]
+kind = "github"
+owner = "someone"
+repos = ["some-repo"]
+token_env = "GITHUB_TOKEN"
 ```
 
-Fetch failures are whispered on `reeds.source.bitbucket` with kind `error`.
+`REEDS_DB` and `REEDS_PORT` env vars override the file's values. Config is
+fail-fast: a malformed file, a wrong-typed value, or a section that fails
+validation refuses the whole boot (comment a section out to disable it). A
+daemon quietly running without a source you configured is the failure mode
+this trades away. Fetch failures at runtime are whispered on
+`reeds.source.<name>` with kind `error`, and a failed poll keeps the previous
+diff baseline, so transient upstream errors do not fabricate `gone`/`seen`
+storms.
+
+Nothing is supervised: hub and source actors are linked to main, so an actor
+crash takes the daemon down and recovery is launchd's job. That is a
+deliberate trade for a single-user local daemon.
 
 New providers implement `source.Source` (a name, an interval, and a
 `poll: fn(Option(String)) -> #(Option(String), List(Draft))`) and register in

@@ -84,7 +84,7 @@ fn read_since(
   prefix: String,
 ) -> Response(ResponseData) {
   let since = query_int(req, "since", 0)
-  let limit = int.min(query_int(req, "limit", 200), max_page)
+  let limit = int.clamp(query_int(req, "limit", 200), min: 1, max: max_page)
   case
     process.call(hub, waiting: 5000, sending: hub.ReadSince(
       prefix,

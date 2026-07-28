@@ -78,10 +78,11 @@ fn publish(
   body: String,
   reply: Subject(Result(Int, String)),
 ) -> actor.Next(State, Msg) {
+  use <- require_valid_topic(state, topic, reply)
   let ts = clock.now_ms()
   case store.append(state.conn, topic:, ts:, sender:, kind:, body:) {
-    Error(error) -> {
-      process.send(reply, Error(store.describe(error)))
+    Error(message) -> {
+      process.send(reply, Error(message))
       actor.continue(state)
     }
     Ok(seq) -> {
@@ -92,6 +93,23 @@ fn publish(
       |> list.each(fn(sub) { process.send(sub.subject, published) })
       process.send(reply, Ok(seq))
       actor.continue(State(..state, subs: live))
+    }
+  }
+}
+
+/// Sources publish directly into the hub, bypassing the API's validation,
+/// so the hub is the backstop that keeps malformed topics out of the log.
+fn require_valid_topic(
+  state: State,
+  topic: String,
+  reply: Subject(Result(Int, String)),
+  continue: fn() -> actor.Next(State, Msg),
+) -> actor.Next(State, Msg) {
+  case whisper.valid_topic(topic) {
+    True -> continue()
+    False -> {
+      process.send(reply, Error("invalid topic: " <> topic))
+      actor.continue(state)
     }
   }
 }

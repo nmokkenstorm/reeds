@@ -3,8 +3,10 @@ import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
 import gleeunit
+import reeds/config
 import reeds/hub
-import reeds/sources/bitbucket.{Pipeline, Pr}
+import reeds/sources/bitbucket
+import reeds/sources/github
 import reeds/store
 import reeds/whisper.{Whisper}
 
@@ -128,23 +130,106 @@ pub fn source_state_test() {
     store.get_source_state(conn, "bitbucket")
 }
 
-pub fn prs_decoder_test() {
-  let fixture =
-    "{\"values\":[{\"id\":12,\"title\":\"fix the thing\",\"state\":\"OPEN\",\"updated_on\":\"2026-07-28T10:00:00Z\",\"unrelated\":true}]}"
-  let assert Ok([Pr(12, "fix the thing", "OPEN", "2026-07-28T10:00:00Z")]) =
-    json.parse(from: fixture, using: bitbucket.prs_decoder())
+pub fn config_parse_test() {
+  let raw =
+    "port = 7444\ndb = \"/tmp/x.db\"\n\n[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = [\"r\"]\ntoken = \"t\"\n"
+  let assert Ok(parsed) = config.parse(raw)
+  assert parsed.port == 7444
+  assert parsed.db == "/tmp/x.db"
+  let assert [config.SourceSpec(name: "work", kind: "bitbucket", table: _)] =
+    parsed.sources
 }
 
-pub fn pipelines_decoder_test() {
+pub fn config_defaults_test() {
+  let assert Ok(parsed) = config.parse("")
+  assert parsed == config.Config(port: 7333, db: "reeds.db", sources: [])
+}
+
+pub fn config_rejects_kindless_source_test() {
+  let assert Error(_) = config.parse("[sources.x]\nworkspace = \"y\"\n")
+}
+
+pub fn from_spec_test() {
+  let raw =
+    "[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = [\"r\"]\ntoken = \"t\"\ntopic_prefix = \"bbs\"\ninterval_seconds = 60\n"
+  let assert Ok(parsed) = config.parse(raw)
+  let assert [spec] = parsed.sources
+  let assert Ok(src) = bitbucket.from_spec(spec.name, spec.table)
+  assert src.name == "work"
+  assert src.interval_ms == 60_000
+}
+
+pub fn from_spec_missing_token_test() {
+  let raw =
+    "[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = [\"r\"]\n"
+  let assert Ok(parsed) = config.parse(raw)
+  let assert [spec] = parsed.sources
+  let assert Error(_) = bitbucket.from_spec(spec.name, spec.table)
+}
+
+pub fn bitbucket_prs_decoder_test() {
+  let fixture =
+    "{\"values\":[{\"id\":12,\"title\":\"fix the thing\",\"state\":\"OPEN\",\"updated_on\":\"2026-07-28T10:00:00Z\",\"unrelated\":true}]}"
+  let assert Ok([item]) =
+    json.parse(from: fixture, using: bitbucket.prs_decoder("api"))
+  assert item.id == "12"
+  assert item.fingerprint == "OPEN|2026-07-28T10:00:00Z"
+  assert item.body
+    == "{\"repo\":\"api\",\"id\":12,\"title\":\"fix the thing\",\"state\":\"OPEN\",\"updated_on\":\"2026-07-28T10:00:00Z\"}"
+}
+
+pub fn bitbucket_pipelines_decoder_test() {
   let fixture =
     "{\"values\":["
     <> "{\"build_number\":512,\"state\":{\"name\":\"COMPLETED\",\"result\":{\"name\":\"SUCCESSFUL\"}},\"target\":{\"ref_name\":\"main\"}},"
     <> "{\"build_number\":513,\"state\":{\"name\":\"IN_PROGRESS\"},\"target\":{}}"
     <> "]}"
-  let assert Ok([
-    Pipeline(512, "COMPLETED", "SUCCESSFUL", "main"),
-    Pipeline(513, "IN_PROGRESS", "", ""),
-  ]) = json.parse(from: fixture, using: bitbucket.pipelines_decoder())
+  let assert Ok([done, running]) =
+    json.parse(from: fixture, using: bitbucket.pipelines_decoder("api"))
+  assert done.id == "512"
+  assert done.fingerprint == "COMPLETED|SUCCESSFUL"
+  assert running.fingerprint == "IN_PROGRESS|"
+}
+
+pub fn github_prs_decoder_test() {
+  let fixture =
+    "[{\"number\":7,\"title\":\"add polling\",\"state\":\"open\",\"updated_at\":\"2026-07-28T09:00:00Z\"}]"
+  let assert Ok([item]) =
+    json.parse(from: fixture, using: github.prs_decoder("tools"))
+  assert item.id == "7"
+  assert item.fingerprint == "open|2026-07-28T09:00:00Z"
+}
+
+pub fn github_runs_decoder_test() {
+  let fixture =
+    "{\"workflow_runs\":["
+    <> "{\"run_number\":42,\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\",\"head_branch\":\"main\"},"
+    <> "{\"run_number\":43,\"name\":\"ci\",\"status\":\"in_progress\",\"conclusion\":null,\"head_branch\":null}"
+    <> "]}"
+  let assert Ok([done, running]) =
+    json.parse(from: fixture, using: github.runs_decoder("tools"))
+  assert done.fingerprint == "completed|success"
+  assert running.fingerprint == "in_progress|"
+}
+
+pub fn config_wrong_type_is_loud_test() {
+  let assert Error(_) = config.parse("port = \"7444\"\n")
+}
+
+pub fn from_spec_rejects_bad_prefix_test() {
+  let raw =
+    "[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = [\"r\"]\ntoken = \"t\"\ntopic_prefix = \"BB\"\n"
+  let assert Ok(parsed) = config.parse(raw)
+  let assert [spec] = parsed.sources
+  let assert Error(_) = bitbucket.from_spec(spec.name, spec.table)
+}
+
+pub fn from_spec_rejects_short_interval_test() {
+  let raw =
+    "[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = [\"r\"]\ntoken = \"t\"\ninterval_seconds = 1\n"
+  let assert Ok(parsed) = config.parse(raw)
+  let assert [spec] = parsed.sources
+  let assert Error(_) = bitbucket.from_spec(spec.name, spec.table)
 }
 
 pub fn hub_publish_subscribe_test() {

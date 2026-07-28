@@ -50,7 +50,7 @@ pub fn append(
   sender sender: String,
   kind kind: String,
   body body: String,
-) -> Result(Int, Error) {
+) -> Result(Int, String) {
   sqlight.query(
     "insert into messages(topic, ts, sender, kind, body)
      values (?1, ?2, ?3, ?4, ?5) returning seq",
@@ -64,10 +64,11 @@ pub fn append(
     ],
     expecting: decode.field(0, decode.int, decode.success),
   )
-  |> result.map(fn(rows) {
+  |> result.map_error(describe)
+  |> result.try(fn(rows) {
     case rows {
-      [seq, ..] -> seq
-      [] -> 0
+      [seq, ..] -> Ok(seq)
+      [] -> Error("insert returned no seq")
     }
   })
 }
