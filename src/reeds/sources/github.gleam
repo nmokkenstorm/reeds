@@ -94,12 +94,15 @@ fn pr_decoder(repo: String) -> decode.Decoder(poller.Item) {
 }
 
 /// Decoder for GitHub's Actions run list; exported for tests.
-/// `conclusion` and `head_branch` are JSON null until known.
+/// `conclusion` and `head_branch` are JSON null until known. Identity is the
+/// globally unique run `id`: `run_number` counts per workflow, so two
+/// workflows in one repo can share a number.
 pub fn runs_decoder(repo: String) -> decode.Decoder(List(poller.Item)) {
   decode.field("workflow_runs", decode.list(run_decoder(repo)), decode.success)
 }
 
 fn run_decoder(repo: String) -> decode.Decoder(poller.Item) {
+  use id <- decode.field("id", decode.int)
   use run <- decode.field("run_number", decode.int)
   use workflow <- decode.field("name", decode.string)
   use status <- decode.field("status", decode.string)
@@ -107,7 +110,7 @@ fn run_decoder(repo: String) -> decode.Decoder(poller.Item) {
   use branch <- decode.field("head_branch", decode.optional(decode.string))
   let conclusion = option.unwrap(conclusion, "")
   decode.success(poller.Item(
-    id: int.to_string(run),
+    id: int.to_string(id),
     fingerprint: status <> "|" <> conclusion,
     body: json.to_string(
       json.object([

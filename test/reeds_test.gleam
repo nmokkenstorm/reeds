@@ -203,11 +203,12 @@ pub fn github_prs_decoder_test() {
 pub fn github_runs_decoder_test() {
   let fixture =
     "{\"workflow_runs\":["
-    <> "{\"run_number\":42,\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\",\"head_branch\":\"main\"},"
-    <> "{\"run_number\":43,\"name\":\"ci\",\"status\":\"in_progress\",\"conclusion\":null,\"head_branch\":null}"
+    <> "{\"id\":9100000001,\"run_number\":42,\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\",\"head_branch\":\"main\"},"
+    <> "{\"id\":9100000002,\"run_number\":43,\"name\":\"ci\",\"status\":\"in_progress\",\"conclusion\":null,\"head_branch\":null}"
     <> "]}"
   let assert Ok([done, running]) =
     json.parse(from: fixture, using: github.runs_decoder("tools"))
+  assert done.id == "9100000001"
   assert done.fingerprint == "completed|success"
   assert running.fingerprint == "in_progress|"
 }
