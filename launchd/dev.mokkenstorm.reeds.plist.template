@@ -6,25 +6,25 @@
   <string>dev.mokkenstorm.reeds</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/homebrew/bin/gleam</string>
+    <string>@GLEAM@</string>
     <string>run</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>/Users/niels/Developer/mokkenstorm-dev/reeds</string>
+  <string>@REPO@</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/bin:/bin</string>
+    <string>@PATH@</string>
     <key>HOME</key>
-    <string>/Users/niels</string>
+    <string>@HOME@</string>
   </dict>
   <key>KeepAlive</key>
   <true/>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>/Users/niels/Library/Logs/reeds.log</string>
+  <string>@HOME@/Library/Logs/reeds.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/niels/Library/Logs/reeds.log</string>
+  <string>@HOME@/Library/Logs/reeds.log</string>
 </dict>
 </plist>

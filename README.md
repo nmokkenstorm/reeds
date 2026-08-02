@@ -46,14 +46,27 @@ down, so it works as a real check rather than a liveness ping.
 
 ## Daemon
 
-`launchd/dev.mokkenstorm.reeds.plist` keeps the daemon running (`KeepAlive`,
-`RunAtLoad`, logs to `~/Library/Logs/reeds.log`):
+`launchd/dev.mokkenstorm.reeds.plist.template` keeps the daemon running
+(`KeepAlive`, `RunAtLoad`, logs to `~/Library/Logs/reeds.log`). launchd expands
+neither `~` nor environment variables in paths, so the template carries
+placeholders and you fill them in from the repo root:
 
 ```sh
-cp launchd/dev.mokkenstorm.reeds.plist ~/Library/LaunchAgents/
+sed -e "s|@GLEAM@|$(command -v gleam)|g" \
+    -e "s|@REPO@|$PWD|g" \
+    -e "s|@PATH@|$(dirname "$(command -v gleam)"):/usr/bin:/bin|g" \
+    -e "s|@HOME@|$HOME|g" \
+  launchd/dev.mokkenstorm.reeds.plist.template \
+  > ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
+
+plutil -lint ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
 launchctl kickstart -k gui/$(id -u)/dev.mokkenstorm.reeds   # restart
 ```
+
+The agent runs `gleam run` from the checkout, so the repo has to stay where it
+is and the Gleam toolchain has to remain installed. Re-run the `sed` after
+moving either.
 
 ## Sources
 
