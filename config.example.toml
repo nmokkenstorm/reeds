@@ -1,0 +1,28 @@
+# Copy to ~/.config/reeds/config.toml (or point REEDS_CONFIG at it).
+# REEDS_DB and REEDS_PORT override the values here.
+
+port = 7333
+db = "/absolute/path/reeds.db"
+
+# Each [sources.<name>] section is an independent poller with its own diff
+# state, sender name, and credentials. Config is fail-fast: a malformed file or
+# a section that fails validation refuses the whole boot. Set enabled = false to
+# park a source without deleting its credentials; a disabled source skips
+# validation too, so stale tokens do not block startup.
+
+[sources.work]
+kind = "bitbucket"
+workspace = "acme"
+repos = ["web", "api"]
+enabled = true
+interval_seconds = 30            # optional, default 30, minimum 5
+token_env = "BITBUCKET_TOKEN"    # or token = "..." inline
+# email = "..."                  # set for Atlassian API tokens (Basic auth)
+# topic_prefix = "bb"            # default ("gh" for github)
+
+[sources.personal]
+kind = "github"
+owner = "someone"
+repos = ["some-repo"]
+enabled = false
+token_env = "GITHUB_TOKEN"

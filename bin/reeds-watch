@@ -3,11 +3,12 @@ set -uo pipefail
 
 REEDS_URL="${REEDS_URL:-http://localhost:7333}"
 PREFIX="${1:-*}"
-LINES="${2:-20}"
+BACKLOG="${2:-20}"
 INTERVAL=2
 
-buf="$(mktemp -t reeds-watch)"
-trap 'rm -f "$buf"' EXIT
+new="$(mktemp -t reeds-watch)"
+trap 'rm -f "$new"; tput cnorm' EXIT
+tput civis
 
 cursor=0
 status="[....]"
@@ -17,47 +18,59 @@ green="$(tput setaf 2)" red="$(tput setaf 1)" cyan="$(tput setaf 6)" yellow="$(t
 
 fetch() {
   local resp more
+  : > "$new"
   while :; do
     resp="$(curl -sf --max-time 3 "$REEDS_URL/t/$PREFIX?since=$cursor&limit=500")" || return 1
     jq -r '.whispers[] | [.seq, (.ts/1000 | floor), .sender, .kind, .topic, (.body | tojson)] | @tsv' \
-      <<<"$resp" >> "$buf"
+      <<<"$resp" >> "$new"
     cursor="$(jq -r '.next_since' <<<"$resp")"
     more="$(jq -r '.more' <<<"$resp")"
     [ "$more" = "true" ] || break
   done
 }
 
-render() {
-  local cols body_w
+print_rows() {
+  local cols body_w seq ts sender kind topic body
   cols="$(tput cols)"
   body_w=$((cols - 74))
   [ "$body_w" -lt 10 ] && body_w=10
-  clear
-  printf '%sreeds%s  %s  prefix=%s  refresh=%ss  %s%s%s\n\n' \
+  while IFS=$'\t' read -r seq ts sender kind topic body; do
+    printf '%s%4.4s%s  %s  %s%-12.12s%s %s%-12.12s%s %s%-30.30s%s %.*s\n' \
+      "$dim" "$seq" "$reset" \
+      "$(date -r "$ts" '+%H:%M:%S')" \
+      "$cyan" "$sender" "$reset" \
+      "$yellow" "$kind" "$reset" \
+      "$bold" "$topic" "$reset" \
+      "$body_w" "$body"
+  done
+}
+
+# The status line is the only thing ever rewritten: it stays on the current
+# line (no trailing newline) and is cleared with \r ESC[2K before each
+# update or before new rows scroll past it. Everything above is scrollback.
+status_line() {
+  printf '\r\033[2K%sreeds%s  %s  prefix=%s  refresh=%ss  %s%s%s' \
     "$bold" "$reset" "$(date '+%H:%M:%S')" "$PREFIX" "$INTERVAL" \
     "$([ "$status" = "[live]" ] && printf '%s' "$green" || printf '%s' "$red")" \
     "$status" "$reset"
-  if [ -s "$buf" ]; then
-    tail -n "$LINES" "$buf" | while IFS=$'\t' read -r seq ts sender kind topic body; do
-      printf '%s%4.4s%s  %s  %s%-12.12s%s %s%-12.12s%s %s%-30.30s%s %.*s\n' \
-        "$dim" "$seq" "$reset" \
-        "$(date -r "$ts" '+%H:%M:%S')" \
-        "$cyan" "$sender" "$reset" \
-        "$yellow" "$kind" "$reset" \
-        "$bold" "$topic" "$reset" \
-        "$body_w" "$body"
-    done
-  else
-    printf '%sno whispers yet%s\n' "$dim" "$reset"
-  fi
 }
 
+first=1
 while :; do
   if fetch; then
     status="[live]"
   else
     status="[down]"
   fi
-  render
+  if [ -s "$new" ]; then
+    printf '\r\033[2K'
+    if [ "$first" = 1 ]; then
+      tail -n "$BACKLOG" "$new" | print_rows
+    else
+      print_rows < "$new"
+    fi
+  fi
+  first=0
+  status_line
   sleep "$INTERVAL"
 done

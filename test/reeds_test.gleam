@@ -2,11 +2,13 @@ import gleam/erlang/process
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/string
 import gleeunit
 import reeds/config
 import reeds/hub
 import reeds/sources/bitbucket
 import reeds/sources/github
+import reeds/sources/gitlab
 import reeds/store
 import reeds/whisper.{Whisper}
 
@@ -136,8 +138,25 @@ pub fn config_parse_test() {
   let assert Ok(parsed) = config.parse(raw)
   assert parsed.port == 7444
   assert parsed.db == "/tmp/x.db"
-  let assert [config.SourceSpec(name: "work", kind: "bitbucket", table: _)] =
-    parsed.sources
+  let assert [
+    config.SourceSpec(name: "work", kind: "bitbucket", enabled: True, table: _),
+  ] = parsed.sources
+}
+
+pub fn config_source_enabled_test() {
+  let cases = [#("enabled = false\n", False), #("enabled = true\n", True)]
+  list.each(cases, fn(item) {
+    let #(line, expected) = item
+    let raw = "[sources.work]\nkind = \"bitbucket\"\n" <> line
+    let assert Ok(parsed) = config.parse(raw)
+    let assert [spec] = parsed.sources
+    assert spec.enabled == expected
+  })
+}
+
+pub fn config_rejects_wrong_typed_enabled_test() {
+  let assert Error(_) =
+    config.parse("[sources.work]\nkind = \"bitbucket\"\nenabled = \"no\"\n")
 }
 
 pub fn config_defaults_test() {
@@ -213,6 +232,50 @@ pub fn github_runs_decoder_test() {
   assert running.fingerprint == "in_progress|"
 }
 
+pub fn gitlab_from_spec_test() {
+  let raw =
+    "[sources.selfhosted]\nkind = \"gitlab\"\nbase_url = \"https://gitlab.example.com\"\ngroup = \"selfhosted\"\nrepos = [\"app\"]\ntoken = \"t\"\ninterval_seconds = 60\n"
+  let assert Ok(parsed) = config.parse(raw)
+  let assert [spec] = parsed.sources
+  let assert Ok(src) = gitlab.from_spec(spec.name, spec.table)
+  assert src.name == "selfhosted"
+  assert src.interval_ms == 60_000
+}
+
+pub fn gitlab_from_spec_missing_group_test() {
+  let raw =
+    "[sources.selfhosted]\nkind = \"gitlab\"\nrepos = [\"app\"]\ntoken = \"t\"\n"
+  let assert Ok(parsed) = config.parse(raw)
+  let assert [spec] = parsed.sources
+  let assert Error(_) = gitlab.from_spec(spec.name, spec.table)
+}
+
+pub fn gitlab_mrs_decoder_test() {
+  let fixture =
+    "[{\"id\":991,\"iid\":14,\"title\":\"wire the thing\",\"state\":\"opened\",\"updated_at\":\"2026-07-28T11:00:00Z\"}]"
+  let assert Ok([item]) =
+    json.parse(from: fixture, using: gitlab.mrs_decoder("app"))
+  assert item.id == "14"
+  assert item.fingerprint == "opened|2026-07-28T11:00:00Z"
+  assert item.body
+    == "{\"repo\":\"app\",\"id\":14,\"title\":\"wire the thing\",\"state\":\"opened\",\"updated_on\":\"2026-07-28T11:00:00Z\"}"
+}
+
+pub fn gitlab_pipelines_decoder_test() {
+  let fixture =
+    "["
+    <> "{\"id\":3021,\"status\":\"success\",\"ref\":\"main\"},"
+    <> "{\"id\":3022,\"status\":\"running\",\"ref\":null}"
+    <> "]"
+  let assert Ok([done, running]) =
+    json.parse(from: fixture, using: gitlab.pipelines_decoder("app"))
+  assert done.id == "3021"
+  assert done.fingerprint == "success"
+  assert running.fingerprint == "running"
+  assert running.body
+    == "{\"repo\":\"app\",\"pipeline\":3022,\"state\":\"running\",\"branch\":\"\"}"
+}
+
 pub fn config_wrong_type_is_loud_test() {
   let assert Error(_) = config.parse("port = \"7444\"\n")
 }
@@ -277,4 +340,19 @@ pub fn hub_publish_subscribe_test() {
   let assert Ok(all) =
     process.call(h, waiting: 1000, sending: hub.ReadSince("*", 0, 10, _))
   assert list.length(all) == 3
+}
+
+@external(erlang, "reeds_rescue_ffi", "rescue")
+fn rescue(thunk: fn() -> a) -> Result(a, String)
+
+@external(erlang, "erlang", "error")
+fn raise(reason: String) -> a
+
+pub fn rescue_passes_a_value_through_test() {
+  assert rescue(fn() { 42 }) == Ok(42)
+}
+
+pub fn rescue_turns_a_raise_into_an_error_test() {
+  let assert Error(detail) = rescue(fn() { raise("socket_closed_remotely") })
+  assert string.contains(detail, "socket_closed_remotely")
 }

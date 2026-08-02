@@ -10,6 +10,12 @@ import gleam/result
 import gleam/string
 import reeds/source.{type Draft, Draft}
 
+/// gleam_httpc raises on transport errors it does not recognise instead of
+/// returning them; catching here keeps a dropped keep-alive from killing the
+/// polling actor.
+@external(erlang, "reeds_rescue_ffi", "rescue")
+fn rescue(thunk: fn() -> a) -> Result(a, String)
+
 /// A pre-rendered upstream record: stable id, change fingerprint, and the
 /// whisper body it becomes when it is new or changed.
 pub type Item {
@@ -189,9 +195,10 @@ fn fetch(
     list.fold(headers, req, fn(req, header) {
       request.set_header(req, header.0, header.1)
     })
-  use resp <- result.try(
-    httpc.send(req) |> result.replace_error("request failed: " <> url),
-  )
+  use resp <- result.try(case rescue(fn() { httpc.send(req) }) {
+    Ok(sent) -> sent |> result.replace_error("request failed: " <> url)
+    Error(crash) -> Error("transport error " <> crash <> " for " <> url)
+  })
   case resp.status {
     200 ->
       json.parse(from: resp.body, using: decoder)

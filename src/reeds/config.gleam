@@ -13,7 +13,12 @@ pub type Config {
 }
 
 pub type SourceSpec {
-  SourceSpec(name: String, kind: String, table: Dict(String, Toml))
+  SourceSpec(
+    name: String,
+    kind: String,
+    enabled: Bool,
+    table: Dict(String, Toml),
+  )
 }
 
 /// Load config from a TOML file. Only a genuinely absent file yields the
@@ -48,9 +53,17 @@ fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
         let #(name, value) = entry
         use _ <- result.try(instance_name(name))
         case value {
-          tom.Table(table) | tom.InlineTable(table) ->
-            required_string(table, "kind", "source " <> name)
-            |> result.map(fn(kind) { SourceSpec(name:, kind:, table:) })
+          tom.Table(table) | tom.InlineTable(table) -> {
+            let context = "source " <> name
+            use kind <- result.try(required_string(table, "kind", context))
+            use enabled <- result.try(optional_bool(
+              table,
+              "enabled",
+              True,
+              context,
+            ))
+            Ok(SourceSpec(name:, kind:, enabled:, table:))
+          }
           _ -> Error("source " <> name <> ": not a table")
         }
       })
@@ -103,6 +116,20 @@ pub fn optional_int(
   context: String,
 ) -> Result(Int, String) {
   case tom.get_int(table, [key]) {
+    Ok(value) -> Ok(value)
+    Error(tom.NotFound(_)) -> Ok(default)
+    Error(tom.WrongType(_, expected, got)) ->
+      Error(wrong_type(context, key, expected, got))
+  }
+}
+
+pub fn optional_bool(
+  table: Dict(String, Toml),
+  key: String,
+  default: Bool,
+  context: String,
+) -> Result(Bool, String) {
+  case tom.get_bool(table, [key]) {
     Ok(value) -> Ok(value)
     Error(tom.NotFound(_)) -> Ok(default)
     Error(tom.WrongType(_, expected, got)) ->

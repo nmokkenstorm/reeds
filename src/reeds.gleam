@@ -12,6 +12,7 @@ import reeds/hub
 import reeds/source.{type Source}
 import reeds/sources/bitbucket
 import reeds/sources/github
+import reeds/sources/gitlab
 import reeds/store
 
 pub fn main() {
@@ -30,7 +31,10 @@ pub fn main() {
 
   let hub_name = process.new_name("reeds_hub")
   let hub_subject = process.named_subject(hub_name)
-  let sources = list.map(config.sources, build_source)
+  let #(active, disabled) =
+    list.partition(config.sources, fn(spec) { spec.enabled })
+  list.each(disabled, announce_disabled)
+  let sources = list.map(active, build_source)
 
   let web =
     mist.new(api.handler(hub_subject))
@@ -58,12 +62,20 @@ fn config_path() -> String {
   }
 }
 
+/// `enabled = false` skips validation as well as polling, so a source can be
+/// parked without its now-stale credentials refusing the boot. Announced on
+/// stdout because a silently absent source is the failure mode reeds avoids.
+fn announce_disabled(spec: SourceSpec) -> Nil {
+  io.println("reeds: source " <> spec.name <> " (" <> spec.kind <> ") disabled")
+}
+
 /// A source that fails validation refuses the whole boot: a daemon quietly
 /// running without a source you configured is worse than a loud crash.
 fn build_source(spec: SourceSpec) -> Source {
   let built = case spec.kind {
     "bitbucket" -> bitbucket.from_spec(spec.name, spec.table)
     "github" -> github.from_spec(spec.name, spec.table)
+    "gitlab" -> gitlab.from_spec(spec.name, spec.table)
     kind -> Error("source " <> spec.name <> ": unknown kind '" <> kind <> "'")
   }
   case built {
