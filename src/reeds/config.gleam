@@ -21,6 +21,16 @@ pub type SourceSpec {
   )
 }
 
+/// A table plus the context every error it produces is labelled with, so a
+/// source module cannot mislabel its own failures or forget the prefix.
+pub opaque type Reader {
+  Reader(table: Dict(String, Toml), context: String)
+}
+
+pub fn source_reader(name: String, table: Dict(String, Toml)) -> Reader {
+  Reader(table:, context: "source " <> name)
+}
+
 /// Load config from a TOML file. Only a genuinely absent file yields the
 /// defaults; unreadable or malformed config is an error, so a permission
 /// mishap cannot silently boot a daemon with zero sources.
@@ -37,8 +47,9 @@ pub fn parse(raw: String) -> Result(Config, String) {
   use toml <- result.try(
     tom.parse(raw) |> result.replace_error("config is not valid toml"),
   )
-  use port <- result.try(optional_int(toml, "port", 7333, "config"))
-  use db <- result.try(optional_string(toml, "db", "reeds.db", "config"))
+  let root = Reader(table: toml, context: "config")
+  use port <- result.try(optional_int(root, "port", 7333))
+  use db <- result.try(optional_string(root, "db", "reeds.db"))
   use sources <- result.try(sources(toml))
   Ok(Config(port:, db:, sources:))
 }
@@ -54,14 +65,9 @@ fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
         use _ <- result.try(instance_name(name))
         case value {
           tom.Table(table) | tom.InlineTable(table) -> {
-            let context = "source " <> name
-            use kind <- result.try(required_string(table, "kind", context))
-            use enabled <- result.try(optional_bool(
-              table,
-              "enabled",
-              True,
-              context,
-            ))
+            let reader = source_reader(name, table)
+            use kind <- result.try(required_string(reader, "kind"))
+            use enabled <- result.try(optional_bool(reader, "enabled", True))
             Ok(SourceSpec(name:, kind:, enabled:, table:))
           }
           _ -> Error("source " <> name <> ": not a table")
@@ -78,161 +84,149 @@ fn instance_name(name: String) -> Result(Nil, String) {
   }
 }
 
-/// Helpers for source modules reading their `[sources.<name>]` table.
-/// Absent keys fall back to defaults; present-but-wrong-typed keys are
-/// errors, so `port = "7444"` cannot silently mean 7333.
-pub fn required_string(
-  table: Dict(String, Toml),
+/// Every typed read goes through here, so one function decides what an
+/// absent key and a wrong-typed key each mean: absent is None, wrong-typed
+/// is always an error. `port = "7444"` cannot silently mean 7333.
+fn lookup(
+  reader: Reader,
+  get: fn(Dict(String, Toml), List(String)) -> Result(a, tom.GetError),
   key: String,
-  context: String,
-) -> Result(String, String) {
-  case tom.get_string(table, [key]) {
-    Ok("") -> Error(context <> ": '" <> key <> "' is empty")
-    Ok(value) -> Ok(value)
-    Error(tom.NotFound(_)) -> Error(context <> ": missing '" <> key <> "'")
+) -> Result(Option(a), String) {
+  case get(reader.table, [key]) {
+    Ok(value) -> Ok(Some(value))
+    Error(tom.NotFound(_)) -> Ok(None)
     Error(tom.WrongType(_, expected, got)) ->
-      Error(wrong_type(context, key, expected, got))
+      Error(problem(
+        reader,
+        key,
+        "should be "
+          <> string.lowercase(expected)
+          <> ", got "
+          <> string.lowercase(got),
+      ))
+  }
+}
+
+fn problem(reader: Reader, key: String, complaint: String) -> String {
+  reader.context <> ": '" <> key <> "' " <> complaint
+}
+
+fn missing(reader: Reader, key: String) -> String {
+  reader.context <> ": missing '" <> key <> "'"
+}
+
+/// Helpers for source modules reading their `[sources.<name>]` table.
+pub fn required_string(reader: Reader, key: String) -> Result(String, String) {
+  use found <- result.try(lookup(reader, tom.get_string, key))
+  case found {
+    Some("") -> Error(problem(reader, key, "is empty"))
+    Some(value) -> Ok(value)
+    None -> Error(missing(reader, key))
   }
 }
 
 pub fn optional_string(
-  table: Dict(String, Toml),
+  reader: Reader,
   key: String,
   default: String,
-  context: String,
 ) -> Result(String, String) {
-  case tom.get_string(table, [key]) {
-    Ok(value) -> Ok(value)
-    Error(tom.NotFound(_)) -> Ok(default)
-    Error(tom.WrongType(_, expected, got)) ->
-      Error(wrong_type(context, key, expected, got))
-  }
+  lookup(reader, tom.get_string, key)
+  |> result.map(option.unwrap(_, default))
 }
 
 pub fn optional_int(
-  table: Dict(String, Toml),
+  reader: Reader,
   key: String,
   default: Int,
-  context: String,
 ) -> Result(Int, String) {
-  case tom.get_int(table, [key]) {
-    Ok(value) -> Ok(value)
-    Error(tom.NotFound(_)) -> Ok(default)
-    Error(tom.WrongType(_, expected, got)) ->
-      Error(wrong_type(context, key, expected, got))
-  }
+  lookup(reader, tom.get_int, key) |> result.map(option.unwrap(_, default))
 }
 
 pub fn optional_bool(
-  table: Dict(String, Toml),
+  reader: Reader,
   key: String,
   default: Bool,
-  context: String,
 ) -> Result(Bool, String) {
-  case tom.get_bool(table, [key]) {
-    Ok(value) -> Ok(value)
-    Error(tom.NotFound(_)) -> Ok(default)
-    Error(tom.WrongType(_, expected, got)) ->
-      Error(wrong_type(context, key, expected, got))
-  }
+  lookup(reader, tom.get_bool, key) |> result.map(option.unwrap(_, default))
 }
 
 pub fn maybe_string(
-  table: Dict(String, Toml),
+  reader: Reader,
   key: String,
-  context: String,
 ) -> Result(Option(String), String) {
-  case tom.get_string(table, [key]) {
-    Ok(value) -> Ok(Some(value))
-    Error(tom.NotFound(_)) -> Ok(None)
-    Error(tom.WrongType(_, expected, got)) ->
-      Error(wrong_type(context, key, expected, got))
-  }
+  lookup(reader, tom.get_string, key)
 }
 
 pub fn string_list(
-  table: Dict(String, Toml),
+  reader: Reader,
   key: String,
-  context: String,
 ) -> Result(List(String), String) {
-  case tom.get_array(table, [key]) {
-    Error(_) -> Error(context <> ": missing '" <> key <> "' list")
-    Ok(items) ->
-      items
-      |> list.try_map(fn(item) {
+  use found <- result.try(lookup(reader, tom.get_array, key))
+  case found {
+    None -> Error(missing(reader, key))
+    Some(items) ->
+      list.try_map(items, fn(item) {
         case item {
           tom.String(value) -> Ok(value)
-          _ -> Error(context <> ": '" <> key <> "' must be strings")
+          _ -> Error(problem(reader, key, "must be strings"))
         }
       })
   }
 }
 
 /// Token from `token`, or the environment variable named by `token_env`.
-pub fn token(
-  table: Dict(String, Toml),
-  context: String,
-) -> Result(String, String) {
-  case tom.get_string(table, ["token"]) {
-    Ok(token) if token != "" -> Ok(token)
-    Ok("") -> Error(context <> ": 'token' is empty")
-    _ ->
-      required_string(table, "token_env", context)
-      |> result.map_error(fn(_) {
-        context <> ": missing 'token' or 'token_env'"
-      })
-      |> result.try(fn(var) {
-        case envoy.get(var) {
-          Ok(value) if value != "" -> Ok(value)
-          _ -> Error(context <> ": env " <> var <> " not set")
-        }
-      })
+pub fn token(reader: Reader) -> Result(String, String) {
+  use direct <- result.try(lookup(reader, tom.get_string, "token"))
+  case direct {
+    Some("") -> Error(problem(reader, "token", "is empty"))
+    Some(value) -> Ok(value)
+    None -> {
+      use named <- result.try(lookup(reader, tom.get_string, "token_env"))
+      use var <- result.try(option.to_result(
+        named,
+        reader.context <> ": missing 'token' or 'token_env'",
+      ))
+      case envoy.get(var) {
+        Ok(value) if value != "" -> Ok(value)
+        _ -> Error(reader.context <> ": env " <> var <> " not set")
+      }
+    }
   }
 }
 
 /// Poll interval in milliseconds, default 30s, minimum 5s: a sub-second
 /// interval is a config error, not an aggressive preference.
-pub fn interval_ms(
-  table: Dict(String, Toml),
-  context: String,
-) -> Result(Int, String) {
-  use seconds <- result.try(optional_int(table, "interval_seconds", 30, context))
+pub fn interval_ms(reader: Reader) -> Result(Int, String) {
+  use seconds <- result.try(optional_int(reader, "interval_seconds", 30))
   case seconds >= 5 {
     True -> Ok(seconds * 1000)
-    False -> Error(context <> ": 'interval_seconds' must be at least 5")
+    False -> Error(problem(reader, "interval_seconds", "must be at least 5"))
+  }
+}
+
+/// Ceiling for the exponential backoff applied while every feed of a source
+/// is failing, default 15m. Rejected below the poll interval, since a cap
+/// under the base would make "backing off" poll faster than normal.
+pub fn backoff_cap_ms(reader: Reader, interval_ms: Int) -> Result(Int, String) {
+  use seconds <- result.try(optional_int(reader, "backoff_cap_seconds", 900))
+  case seconds * 1000 >= interval_ms {
+    True -> Ok(seconds * 1000)
+    False ->
+      Error(problem(
+        reader,
+        "backoff_cap_seconds",
+        "must be at least 'interval_seconds'",
+      ))
   }
 }
 
 /// Topic prefix, validated so a typo fails at boot rather than as an
 /// endless stream of hub rejections.
-pub fn topic_prefix(
-  table: Dict(String, Toml),
-  default: String,
-  context: String,
-) -> Result(String, String) {
-  use prefix <- result.try(optional_string(
-    table,
-    "topic_prefix",
-    default,
-    context,
-  ))
+pub fn topic_prefix(reader: Reader, default: String) -> Result(String, String) {
+  use prefix <- result.try(optional_string(reader, "topic_prefix", default))
   case whisper.valid_topic(prefix) {
     True -> Ok(prefix)
-    False -> Error(context <> ": 'topic_prefix' is not a valid topic prefix")
+    False ->
+      Error(problem(reader, "topic_prefix", "is not a valid topic prefix"))
   }
-}
-
-fn wrong_type(
-  context: String,
-  key: String,
-  expected: String,
-  got: String,
-) -> String {
-  context
-  <> ": '"
-  <> key
-  <> "' should be "
-  <> string.lowercase(expected)
-  <> ", got "
-  <> string.lowercase(got)
 }

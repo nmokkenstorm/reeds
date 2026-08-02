@@ -5,6 +5,7 @@ import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
 import reeds/config
+import reeds/health
 import reeds/hub
 import reeds/sources/bitbucket
 import reeds/sources/github
@@ -186,6 +187,17 @@ pub fn from_spec_missing_token_test() {
   let assert Error(_) = bitbucket.from_spec(spec.name, spec.table)
 }
 
+/// A wrong-typed key must not be reported as an absent one: `repos = "r"`
+/// used to read "missing 'repos'", which sends you looking for the wrong bug.
+pub fn from_spec_wrong_typed_repos_test() {
+  let raw =
+    "[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = \"r\"\ntoken = \"t\"\n"
+  let assert Ok(parsed) = config.parse(raw)
+  let assert [spec] = parsed.sources
+  let assert Error(message) = bitbucket.from_spec(spec.name, spec.table)
+  assert message == "source work: 'repos' should be array, got string"
+}
+
 pub fn bitbucket_prs_decoder_test() {
   let fixture =
     "{\"values\":[{\"id\":12,\"title\":\"fix the thing\",\"state\":\"OPEN\",\"updated_on\":\"2026-07-28T10:00:00Z\",\"unrelated\":true}]}"
@@ -294,6 +306,217 @@ pub fn from_spec_rejects_short_interval_test() {
   let assert Ok(parsed) = config.parse(raw)
   let assert [spec] = parsed.sources
   let assert Error(_) = bitbucket.from_spec(spec.name, spec.table)
+}
+
+fn feed_at(name: String, streak: Int, reason: String) -> health.FeedHealth {
+  case streak {
+    0 ->
+      health.FeedHealth(
+        feed: name,
+        last_ok_ts: Some(1000),
+        consecutive_failures: 0,
+        last_error: None,
+        last_error_ts: None,
+      )
+    _ ->
+      health.FeedHealth(
+        feed: name,
+        last_ok_ts: None,
+        consecutive_failures: streak,
+        last_error: Some(reason),
+        last_error_ts: Some(2000),
+      )
+  }
+}
+
+fn feed(name: String, streak: Int) -> health.FeedHealth {
+  feed_at(name, streak, "boom")
+}
+
+pub fn health_backoff_test() {
+  [
+    #(0, 30_000),
+    #(1, 30_000),
+    #(2, 60_000),
+    #(3, 120_000),
+    #(4, 240_000),
+    #(5, 480_000),
+    #(6, 900_000),
+    #(2941, 900_000),
+  ]
+  |> list.each(fn(row) {
+    let #(streak, expected) = row
+    assert health.backoff(30_000, streak, 900_000) == expected
+  })
+}
+
+pub fn health_state_derivation_test() {
+  [
+    #([], True, health.Unknown, 0, 0),
+    #([#("pr:a", 0), #("run:a", 0)], True, health.Healthy, 0, 2),
+    #([#("pr:a", 0), #("run:a", 3)], True, health.Degraded, 0, 1),
+    #([#("pr:a", 2), #("run:a", 5)], True, health.Down, 2, 0),
+    #([#("pr:a", 0)], False, health.Disabled, 0, 0),
+  ]
+  |> list.each(fn(row) {
+    let #(feeds, enabled, state, streak, ok) = row
+    let summary =
+      health.summarise(
+        "s",
+        "github",
+        enabled,
+        list.map(feeds, fn(spec) { feed(spec.0, spec.1) }),
+      )
+    assert summary.state == state
+    assert summary.down_streak == streak
+    assert summary.feeds_ok == ok
+  })
+}
+
+pub fn health_announces_only_on_change_test() {
+  let down = health.summarise("s", "github", True, [feed("pr:a", 1)])
+  let still_down = health.summarise("s", "github", True, [feed("pr:a", 2)])
+  let healthy = health.summarise("s", "github", True, [feed("pr:a", 0)])
+
+  let assert Some(first) = health.announce(None, down, 9000)
+  assert first.kind == "source.down"
+
+  assert health.announce(Some(down), still_down, 9000) == None
+
+  let assert Some(back) = health.announce(Some(still_down), healthy, 9000)
+  assert back.kind == "source.recovered"
+
+  assert health.announce(Some(healthy), healthy, 9000) == None
+}
+
+/// A different reason is new information even at the same state.
+pub fn health_announces_on_changed_reason_test() {
+  let unauthorised =
+    health.summarise("s", "github", True, [feed_at("pr:a", 1, "status 401")])
+  let forbidden =
+    health.summarise("s", "github", True, [feed_at("pr:a", 2, "status 403")])
+  let assert Some(second) = health.announce(Some(unauthorised), forbidden, 9000)
+  assert second.kind == "source.down"
+}
+
+/// A source polling cleanly for the first time has not "recovered".
+pub fn health_first_clean_poll_is_silent_test() {
+  let healthy = health.summarise("s", "github", True, [feed("pr:a", 0)])
+  assert health.announce(None, healthy, 9000) == None
+}
+
+pub fn store_health_roundtrip_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  let failing = [health.Reached("pr:a"), health.Unreachable("run:a", "401")]
+
+  let assert Ok(Nil) = store.record_poll(conn, "gh", failing, 1000)
+  let assert Ok([pr, run]) = store.read_source_health(conn, "gh")
+  assert pr.last_ok_ts == Some(1000)
+  assert pr.consecutive_failures == 0
+  assert run.consecutive_failures == 1
+  assert run.last_error == Some("401")
+
+  let assert Ok(Nil) = store.record_poll(conn, "gh", failing, 2000)
+  let assert Ok([_, twice]) = store.read_source_health(conn, "gh")
+  assert twice.consecutive_failures == 2
+
+  let assert Ok(Nil) =
+    store.record_poll(
+      conn,
+      "gh",
+      [health.Reached("pr:a"), health.Reached("run:a")],
+      3000,
+    )
+  let assert Ok([_, recovered]) = store.read_source_health(conn, "gh")
+  assert recovered.consecutive_failures == 0
+  assert recovered.last_error == None
+}
+
+pub fn store_health_prunes_stale_feeds_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(Nil) =
+    store.record_poll(
+      conn,
+      "gh",
+      [health.Reached("pr:a"), health.Reached("pr:b")],
+      1000,
+    )
+  let assert Ok(both) = store.read_source_health(conn, "gh")
+  assert list.length(both) == 2
+
+  let assert Ok(Nil) =
+    store.record_poll(conn, "gh", [health.Reached("pr:a")], 2000)
+  let assert Ok([only]) = store.read_source_health(conn, "gh")
+  assert only.feed == "pr:a"
+}
+
+pub fn store_health_prunes_removed_sources_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(Nil) =
+    store.record_poll(conn, "gone", [health.Reached("pr:a")], 1000)
+  let assert Ok(Nil) = store.prune_sources(conn, ["still-here"])
+  let assert Ok([]) = store.read_source_health(conn, "gone")
+}
+
+pub fn hub_record_poll_whispers_transitions_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(started) = hub.start(conn)
+  let h = started.data
+  process.send(h, hub.SetRoster([health.Registration("gh", "github", True)]))
+
+  let inbox = process.new_subject()
+  process.send(h, hub.Subscribe("reeds.source", 0, inbox))
+
+  let failing = [health.Unreachable("pr:a", "status 401")]
+
+  let assert 1 =
+    process.call(h, waiting: 1000, sending: hub.RecordPoll("gh", failing, _))
+  let assert Ok(first) = process.receive(inbox, 1000)
+  assert first.kind == "source.down"
+
+  // Identical failure: the streak climbs, the network stays quiet.
+  let assert 2 =
+    process.call(h, waiting: 1000, sending: hub.RecordPoll("gh", failing, _))
+  let assert Error(_) = process.receive(inbox, 100)
+
+  let assert 0 =
+    process.call(h, waiting: 1000, sending: hub.RecordPoll(
+      "gh",
+      [health.Reached("pr:a")],
+      _,
+    ))
+  let assert Ok(back) = process.receive(inbox, 1000)
+  assert back.kind == "source.recovered"
+}
+
+/// The report comes from the roster, so a configured source is never simply
+/// absent from it.
+pub fn hub_health_reports_roster_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(started) = hub.start(conn)
+  let h = started.data
+  process.send(
+    h,
+    hub.SetRoster([
+      health.Registration("gh", "github", True),
+      health.Registration("parked", "bitbucket", False),
+    ]),
+  )
+
+  let assert Ok(sources) = process.call(h, waiting: 1000, sending: hub.Health)
+  let assert [gh, parked] = sources
+  assert gh.state == health.Unknown
+  assert parked.state == health.Disabled
+  assert health.all_ok(sources)
+
+  let assert 1 =
+    process.call(h, waiting: 1000, sending: hub.RecordPoll(
+      "gh",
+      [health.Unreachable("pr:a", "status 401")],
+      _,
+    ))
+  let assert Ok(down) = process.call(h, waiting: 1000, sending: hub.Health)
+  assert !health.all_ok(down)
 }
 
 pub fn hub_publish_subscribe_test() {

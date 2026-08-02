@@ -5,16 +5,31 @@ import gleam/option.{type Option, Some}
 import gleam/otp/actor
 import gleam/otp/supervision
 import gleam/result
+import reeds/health
 import reeds/hub
 
 /// A Source polls some upstream, diffs against its persisted state, and
 /// returns whispers to publish. Implementations own the diffing; the runner
-/// owns scheduling and state persistence.
+/// owns scheduling, state persistence, and backoff.
 pub type Source {
   Source(
     name: String,
     interval_ms: Int,
-    poll: fn(Option(String)) -> #(Option(String), List(Draft)),
+    backoff_cap_ms: Int,
+    poll: fn(Option(String)) -> Poll,
+  )
+}
+
+/// The result of one tick: the next diff baseline, the whispers to publish,
+/// and whether each polled collection was reachable. Reachability is a
+/// separate channel from the drafts on purpose: when failure is just another
+/// draft, the runner cannot tell a working poll from a broken one, so it
+/// cannot back off and the hub cannot report health.
+pub type Poll {
+  Poll(
+    baseline: Option(String),
+    drafts: List(Draft),
+    feeds: List(health.FeedOutcome),
   )
 }
 
@@ -63,9 +78,9 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
       source.name,
       _,
     ))
-  let #(next, drafts) = source.poll(previous)
+  let poll = source.poll(previous)
   let published =
-    list.fold(drafts, True, fn(all_ok, draft) {
+    list.fold(poll.drafts, True, fn(all_ok, draft) {
       process.call(state.hub, waiting: 5000, sending: hub.Publish(
         draft.topic,
         source.name,
@@ -83,11 +98,23 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
     })
   // A failed publish keeps the old baseline, so the drafts are rebuilt and
   // retried next poll instead of being lost forever.
-  case next, published {
+  case poll.baseline, published {
     Some(next_state), True ->
       process.send(state.hub, hub.PutSourceState(source.name, next_state))
     _, _ -> Nil
   }
-  process.send_after(state.self, source.interval_ms, Tick)
+  // The hub answers with the all-feeds-failing streak, so backoff policy
+  // stays here with the rest of the scheduling.
+  let down_streak =
+    process.call(state.hub, waiting: 5000, sending: hub.RecordPoll(
+      source.name,
+      poll.feeds,
+      _,
+    ))
+  process.send_after(
+    state.self,
+    health.backoff(source.interval_ms, down_streak, source.backoff_cap_ms),
+    Tick,
+  )
   actor.continue(state)
 }

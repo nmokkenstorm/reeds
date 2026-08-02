@@ -8,6 +8,7 @@ import gleam/result
 import mist
 import reeds/api
 import reeds/config.{type SourceSpec}
+import reeds/health
 import reeds/hub
 import reeds/source.{type Source}
 import reeds/sources/bitbucket
@@ -49,6 +50,20 @@ pub fn main() {
     })
     |> supervisor.add(mist.supervised(web))
     |> supervisor.start
+  // The roster is what `/health` reports against, so a configured source
+  // shows up as disabled or unknown instead of quietly missing.
+  process.send(
+    hub_subject,
+    hub.SetRoster(
+      list.map(config.sources, fn(spec) {
+        health.Registration(
+          name: spec.name,
+          kind: spec.kind,
+          enabled: spec.enabled,
+        )
+      }),
+    ),
+  )
   io.println("reeds: listening on http://localhost:" <> int.to_string(port))
 
   process.sleep_forever()

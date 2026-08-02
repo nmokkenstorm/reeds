@@ -1,6 +1,11 @@
 import gleam/dynamic/decode
+import gleam/json
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import reeds/health.{
+  type FeedHealth, type FeedOutcome, FeedHealth, Reached, Unreachable,
+}
 import reeds/whisper.{type Whisper, Whisper}
 import sqlight.{type Connection, type Error}
 
@@ -17,6 +22,15 @@ create index if not exists messages_topic on messages(topic);
 create table if not exists source_state(
   name  text primary key,
   state text not null
+) strict;
+create table if not exists source_health(
+  source               text not null,
+  feed                 text not null,
+  last_ok_ts           integer,
+  consecutive_failures integer not null default 0,
+  last_error           text,
+  last_error_ts        integer,
+  primary key (source, feed)
 ) strict;
 "
 
@@ -141,6 +155,152 @@ pub fn put_source_state(
      on conflict(name) do update set state = excluded.state",
     on: conn,
     with: [sqlight.text(name), sqlight.text(state)],
+    expecting: decode.success(Nil),
+  )
+  |> result.replace(Nil)
+}
+
+/// Record one poll's reachability per feed and drop rows for feeds the source
+/// no longer polls, so a shrunk `repos` list cannot leave a phantom feed down
+/// forever.
+pub fn record_poll(
+  conn: Connection,
+  source: String,
+  outcomes: List(FeedOutcome),
+  now_ms: Int,
+) -> Result(Nil, Error) {
+  use _ <- result.try(
+    outcomes
+    |> list.try_map(fn(outcome) { record_feed(conn, source, outcome, now_ms) }),
+  )
+  prune_feeds(conn, source, outcomes)
+}
+
+fn record_feed(
+  conn: Connection,
+  source: String,
+  outcome: FeedOutcome,
+  now_ms: Int,
+) -> Result(Nil, Error) {
+  case outcome {
+    Reached(feed) ->
+      sqlight.query(
+        "insert into source_health(source, feed, last_ok_ts, consecutive_failures)
+         values (?1, ?2, ?3, 0)
+         on conflict(source, feed) do update set
+           last_ok_ts = excluded.last_ok_ts,
+           consecutive_failures = 0,
+           last_error = null,
+           last_error_ts = null",
+        on: conn,
+        with: [sqlight.text(source), sqlight.text(feed), sqlight.int(now_ms)],
+        expecting: decode.success(Nil),
+      )
+      |> result.replace(Nil)
+    Unreachable(feed, reason) ->
+      sqlight.query(
+        "insert into source_health(source, feed, consecutive_failures, last_error, last_error_ts)
+         values (?1, ?2, 1, ?3, ?4)
+         on conflict(source, feed) do update set
+           consecutive_failures = source_health.consecutive_failures + 1,
+           last_error = excluded.last_error,
+           last_error_ts = excluded.last_error_ts",
+        on: conn,
+        with: [
+          sqlight.text(source),
+          sqlight.text(feed),
+          sqlight.text(reason),
+          sqlight.int(now_ms),
+        ],
+        expecting: decode.success(Nil),
+      )
+      |> result.replace(Nil)
+  }
+}
+
+fn prune_feeds(
+  conn: Connection,
+  source: String,
+  outcomes: List(FeedOutcome),
+) -> Result(Nil, Error) {
+  let keep =
+    outcomes
+    |> list.map(fn(outcome) {
+      case outcome {
+        Reached(feed) -> feed
+        Unreachable(feed, _) -> feed
+      }
+    })
+    |> json.array(json.string)
+    |> json.to_string
+  sqlight.query(
+    "delete from source_health
+     where source = ?1 and feed not in (select value from json_each(?2))",
+    on: conn,
+    with: [sqlight.text(source), sqlight.text(keep)],
+    expecting: decode.success(Nil),
+  )
+  |> result.replace(Nil)
+}
+
+fn feed_health_decoder() -> decode.Decoder(#(String, FeedHealth)) {
+  use source <- decode.field(0, decode.string)
+  use feed <- decode.field(1, decode.string)
+  use last_ok_ts <- decode.field(2, decode.optional(decode.int))
+  use consecutive_failures <- decode.field(3, decode.int)
+  use last_error <- decode.field(4, decode.optional(decode.string))
+  use last_error_ts <- decode.field(5, decode.optional(decode.int))
+  decode.success(#(
+    source,
+    FeedHealth(
+      feed:,
+      last_ok_ts:,
+      consecutive_failures:,
+      last_error:,
+      last_error_ts:,
+    ),
+  ))
+}
+
+pub fn read_health(
+  conn: Connection,
+) -> Result(List(#(String, FeedHealth)), Error) {
+  sqlight.query(
+    "select source, feed, last_ok_ts, consecutive_failures, last_error,
+            last_error_ts
+     from source_health order by source asc, feed asc",
+    on: conn,
+    with: [],
+    expecting: feed_health_decoder(),
+  )
+}
+
+pub fn read_source_health(
+  conn: Connection,
+  source: String,
+) -> Result(List(FeedHealth), Error) {
+  sqlight.query(
+    "select source, feed, last_ok_ts, consecutive_failures, last_error,
+            last_error_ts
+     from source_health where source = ?1 order by feed asc",
+    on: conn,
+    with: [sqlight.text(source)],
+    expecting: feed_health_decoder(),
+  )
+  |> result.map(list.map(_, fn(row) { row.1 }))
+}
+
+/// Drop health for sources no longer in the config, so a renamed or deleted
+/// section does not haunt `/health`.
+pub fn prune_sources(
+  conn: Connection,
+  names: List(String),
+) -> Result(Nil, Error) {
+  sqlight.query(
+    "delete from source_health
+     where source not in (select value from json_each(?1))",
+    on: conn,
+    with: [sqlight.text(json.to_string(json.array(names, json.string)))],
     expecting: decode.success(Nil),
   )
   |> result.replace(Nil)

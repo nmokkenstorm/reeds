@@ -12,6 +12,7 @@ import gleam/otp/actor
 import gleam/result
 import gleam/string_tree
 import mist.{type Connection, type ResponseData}
+import reeds/health as health_module
 import reeds/hub
 import reeds/whisper.{type Whisper}
 
@@ -24,12 +25,22 @@ pub fn handler(
 ) -> fn(Request(Connection)) -> Response(ResponseData) {
   fn(req) {
     case request.path_segments(req), req.method {
-      ["health"], Get -> json_response(200, "{\"ok\":true}")
+      ["health"], Get -> health(hub)
       ["t", topic], Post -> publish(hub, req, topic)
       ["t", prefix], Get -> read_since(hub, req, prefix)
       ["t", prefix, "events"], Get -> sse(hub, req, prefix)
       _, _ -> json_response(404, "{\"error\":\"not found\"}")
     }
+  }
+}
+
+/// 200 with `ok: false` rather than 5xx when a source is down: the daemon is
+/// answering correctly, it is the upstream that is broken, and a transport
+/// error would tell a caller the wrong thing.
+fn health(hub_subject: Subject(hub.Msg)) -> Response(ResponseData) {
+  case process.call(hub_subject, waiting: 5000, sending: hub.Health) {
+    Error(reason) -> error_response(500, reason)
+    Ok(sources) -> json_response(200, health_module.to_json(sources))
   }
 }
 

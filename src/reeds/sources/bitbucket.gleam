@@ -19,17 +19,14 @@ pub fn from_spec(
   name: String,
   table: Dict(String, tom.Toml),
 ) -> Result(Source, String) {
-  let context = "source " <> name
-  use workspace <- result.try(config.required_string(
-    table,
-    "workspace",
-    context,
-  ))
-  use repos <- result.try(config.string_list(table, "repos", context))
-  use token <- result.try(config.token(table, context))
-  use email <- result.try(config.maybe_string(table, "email", context))
-  use interval_ms <- result.try(config.interval_ms(table, context))
-  use prefix <- result.try(config.topic_prefix(table, "bb", context))
+  let reader = config.source_reader(name, table)
+  use workspace <- result.try(config.required_string(reader, "workspace"))
+  use repos <- result.try(config.string_list(reader, "repos"))
+  use token <- result.try(config.token(reader))
+  use email <- result.try(config.maybe_string(reader, "email"))
+  use interval_ms <- result.try(config.interval_ms(reader))
+  use backoff_cap_ms <- result.try(config.backoff_cap_ms(reader, interval_ms))
+  use prefix <- result.try(config.topic_prefix(reader, "bb"))
   let authorization = case email {
     Some(email) ->
       "Basic "
@@ -77,7 +74,9 @@ pub fn from_spec(
         ),
       ],
     )
-  Ok(Source(name:, interval_ms:, poll: poller.poll(upstream, _)))
+  Ok(
+    Source(name:, interval_ms:, backoff_cap_ms:, poll: poller.poll(upstream, _)),
+  )
 }
 
 /// Decoder for Bitbucket's paged PR list; exported for tests.

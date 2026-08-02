@@ -19,18 +19,18 @@ pub fn from_spec(
   name: String,
   table: Dict(String, tom.Toml),
 ) -> Result(Source, String) {
-  let context = "source " <> name
+  let reader = config.source_reader(name, table)
   use base_url <- result.try(config.optional_string(
-    table,
+    reader,
     "base_url",
     "https://gitlab.com",
-    context,
   ))
-  use group <- result.try(config.required_string(table, "group", context))
-  use repos <- result.try(config.string_list(table, "repos", context))
-  use token <- result.try(config.token(table, context))
-  use interval_ms <- result.try(config.interval_ms(table, context))
-  use prefix <- result.try(config.topic_prefix(table, "gl", context))
+  use group <- result.try(config.required_string(reader, "group"))
+  use repos <- result.try(config.string_list(reader, "repos"))
+  use token <- result.try(config.token(reader))
+  use interval_ms <- result.try(config.interval_ms(reader))
+  use backoff_cap_ms <- result.try(config.backoff_cap_ms(reader, interval_ms))
+  use prefix <- result.try(config.topic_prefix(reader, "gl"))
   let base = case string.ends_with(base_url, "/") {
     True -> string.drop_end(base_url, 1)
     False -> base_url
@@ -65,7 +65,9 @@ pub fn from_spec(
         ),
       ],
     )
-  Ok(Source(name:, interval_ms:, poll: poller.poll(upstream, _)))
+  Ok(
+    Source(name:, interval_ms:, backoff_cap_ms:, poll: poller.poll(upstream, _)),
+  )
 }
 
 /// Decoder for GitLab's MR list (a bare array); exported for tests.

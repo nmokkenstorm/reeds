@@ -30,8 +30,48 @@ case "$cmd" in
     curl -sfN "$REEDS_URL/t/$prefix/events?since=$since"
     ;;
   health)
-    curl -sf "$REEDS_URL/health"
-    echo
+    raw="$(curl -sf "$REEDS_URL/health")" || {
+      echo "reeds: daemon unreachable at $REEDS_URL" >&2
+      exit 2
+    }
+    if [ "${1:-}" = "--json" ] || ! command -v jq >/dev/null 2>&1; then
+      echo "$raw"
+    else
+      if [ -t 1 ]; then
+        dim=$(tput dim) red=$(tput setaf 1) yellow=$(tput setaf 3) \
+          green=$(tput setaf 2) reset=$(tput sgr0)
+      else
+        dim="" red="" yellow="" green="" reset=""
+      fi
+      jq -r --arg now "$(date +%s)" '
+        def age($ts):
+          if $ts == null then "never"
+          else (($now | tonumber) - ($ts / 1000)) as $s
+            | if   $s <    60 then "\($s | floor)s ago"
+              elif $s <  3600 then "\(($s / 60)    | floor)m ago"
+              elif $s < 86400 then "\(($s / 3600)  | floor)h ago"
+              else                 "\(($s / 86400) | floor)d ago"
+              end
+          end;
+        .sources[]
+        | [ .name, .state, "\(.feeds_ok)/\(.feeds_total)",
+            age(.last_success_ts), (.last_error.reason // "") ]
+        | @tsv
+      ' <<<"$raw" |
+        while IFS=$'\t' read -r name state feeds last err; do
+          case "$state" in
+            down) colour="$red" ;;
+            degraded) colour="$yellow" ;;
+            healthy) colour="$green" ;;
+            *) colour="$dim" ;;
+          esac
+          printf '%-14s %s%-9s%s %-8s %-12s %s%s%s\n' \
+            "$name" "$colour" "$state" "$reset" "$feeds" "$last" \
+            "$dim" "$err" "$reset"
+        done
+    fi
+    # Exit 1 when any source is down, so a health check can actually fail.
+    jq -e '.ok' >/dev/null 2>&1 <<<"$raw" || exit 1
     ;;
   *)
     cat <<'EOF'
@@ -39,7 +79,7 @@ usage:
   reeds pub <topic> <json> [kind]     publish a whisper
   reeds since <prefix> [seq]          fetch whispers after seq (cursor pull)
   reeds tail [prefix] [seq]           live SSE tail (default: everything)
-  reeds health                        daemon check
+  reeds health [--json]               per-source health; exit 1 if any down
 env: REEDS_URL (default http://localhost:7333), REEDS_SENDER (default whoami)
 EOF
     ;;

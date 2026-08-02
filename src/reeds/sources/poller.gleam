@@ -8,7 +8,8 @@ import gleam/list
 import gleam/option.{type Option, Some}
 import gleam/result
 import gleam/string
-import reeds/source.{type Draft, Draft}
+import reeds/health.{type FeedOutcome, Reached, Unreachable}
+import reeds/source.{type Draft, type Poll, Draft, Poll}
 
 /// gleam_httpc raises on transport errors it does not recognise instead of
 /// returning them; catching here keeps a dropped keep-alive from killing the
@@ -46,18 +47,16 @@ pub type Upstream {
 }
 
 type Acc =
-  #(Dict(String, String), List(Draft))
+  #(Dict(String, String), List(Draft), List(FeedOutcome))
 
 /// Poll every feed of every repo, diff against the persisted fingerprint
-/// map, and return the new map plus drafts for what changed.
-pub fn poll(
-  up: Upstream,
-  previous: Option(String),
-) -> #(Option(String), List(Draft)) {
+/// map, and return the new map, drafts for what changed, and whether each
+/// feed was reachable.
+pub fn poll(up: Upstream, previous: Option(String)) -> Poll {
   let seen = parse_state(previous)
-  let #(current, drafts) =
+  let #(current, drafts, outcomes) =
     up.repos
-    |> list.fold(#(dict.new(), []), fn(acc, repo) {
+    |> list.fold(#(dict.new(), [], []), fn(acc, repo) {
       list.fold(up.feeds, acc, fn(acc, feed) {
         poll_feed(acc, up, repo, seen, feed)
       })
@@ -74,7 +73,11 @@ pub fn poll(
       && !dict.has_key(current, key)
     })
     |> list.map(gone_draft(up.prefix, _))
-  #(Some(dump_state(current)), list.append(drafts, gone))
+  Poll(
+    baseline: Some(dump_state(current)),
+    drafts: list.append(drafts, gone),
+    feeds: outcomes,
+  )
 }
 
 fn poll_feed(
@@ -84,14 +87,15 @@ fn poll_feed(
   seen: Dict(String, String),
   feed: Feed,
 ) -> Acc {
-  let #(fingerprints, drafts) = acc
+  let #(fingerprints, drafts, outcomes) = acc
   case fetch(up.headers, feed.url(repo), feed.decoder(repo)) {
     // Carry the previous baseline forward on failure, so a transient error
     // neither fabricates gone events nor replays seen ones after recovery.
-    Error(reason) -> #(carry_forward(fingerprints, seen, key_ns(feed, repo)), [
-      error_draft(up.name, repo, reason),
-      ..drafts
-    ])
+    Error(reason) -> #(
+      carry_forward(fingerprints, seen, key_ns(feed, repo)),
+      drafts,
+      [Unreachable(feed: feed_key(feed, repo), reason:), ..outcomes],
+    )
     Ok(items) -> {
       let fingerprints =
         list.fold(items, fingerprints, fn(fps, item) {
@@ -106,13 +110,22 @@ fn poll_feed(
             Ok(_) -> Error(Nil)
           }
         })
-      #(fingerprints, list.append(fresh, drafts))
+      #(fingerprints, list.append(fresh, drafts), [
+        Reached(feed: feed_key(feed, repo)),
+        ..outcomes
+      ])
     }
   }
 }
 
+/// The health key for one polled collection; `key_ns` extends it into the
+/// diff-state key space, so the two cannot drift apart.
+fn feed_key(feed: Feed, repo: String) -> String {
+  feed.ns <> ":" <> string.lowercase(repo)
+}
+
 fn key_ns(feed: Feed, repo: String) -> String {
-  feed.ns <> ":" <> string.lowercase(repo) <> "/"
+  feed_key(feed, repo) <> "/"
 }
 
 fn key(feed: Feed, repo: String, item: Item) -> String {
@@ -166,19 +179,6 @@ fn gone_draft(prefix: String, seen_key: String) -> Draft {
     kind: ns <> ".gone",
     body: json.to_string(
       json.object([#("repo", json.string(repo)), #("id", json.string(id))]),
-    ),
-  )
-}
-
-fn error_draft(name: String, repo: String, reason: String) -> Draft {
-  Draft(
-    topic: "reeds.source." <> name,
-    kind: "error",
-    body: json.to_string(
-      json.object([
-        #("repo", json.string(repo)),
-        #("error", json.string(reason)),
-      ]),
     ),
   )
 }
