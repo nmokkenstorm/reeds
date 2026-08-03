@@ -40,8 +40,16 @@ widening it is a decision you make on purpose, not one a default makes for you.
 | `GET /t/:prefix?since=N` | Whispers after seq N under prefix. Returns `next_since`.  |
 | `GET /t/:prefix/events`  | SSE tail; `?since=N` or `Last-Event-ID` to resume.        |
 | `GET /health`            | Per-source health. `ok` is false when any source is down. |
+| `GET /state?prefix=P`    | Latest whisper per topic under `P`, tombstones dropped.   |
+| `GET /dashboard`         | Static page that polls `/state` and renders it.           |
 
 Headers on publish: `x-reeds-sender`, `x-reeds-kind` (both optional).
+
+`/state` folds the log rather than replaying it: one entry per topic, the
+latest whisper only, minus topics whose latest kind is `pr.gone`, `mr.gone`,
+or `done`. It is honest about being event-sourced: an entry means "this was
+last whispered", not "this is currently true". `/dashboard` groups entries by
+topic prefix and shows ages; `needs-user` whispers get a dedicated lane.
 
 Topics are dotted lowercase segments (`bb.pr.api.12`). A prefix matches
 whole segments: `bb.pr` matches `bb.pr.x` but not `bb.private`. `*` matches
