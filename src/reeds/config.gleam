@@ -9,7 +9,13 @@ import simplifile
 import tom.{type Toml}
 
 pub type Config {
-  Config(port: Int, bind: String, db: String, sources: List(SourceSpec))
+  Config(
+    port: Int,
+    bind: String,
+    db: String,
+    sources: List(SourceSpec),
+    peers: List(PeerSpec),
+  )
 }
 
 pub type SourceSpec {
@@ -19,6 +25,13 @@ pub type SourceSpec {
     enabled: Bool,
     table: Dict(String, Toml),
   )
+}
+
+/// A peer bridge whose token authenticates non-loopback requests. `url` and
+/// `mode` (the sync loop's own concerns) are deliberately absent: nothing
+/// reads them yet.
+pub type PeerSpec {
+  PeerSpec(name: String, token: String)
 }
 
 /// A table plus the context every error it produces is labelled with, so a
@@ -54,7 +67,8 @@ pub fn parse(raw: String) -> Result(Config, String) {
   use bind <- result.try(optional_string(root, "bind", "localhost"))
   use db <- result.try(optional_string(root, "db", "reeds.db"))
   use sources <- result.try(sources(toml))
-  Ok(Config(port:, bind:, db:, sources:))
+  use peers <- result.try(peers(toml))
+  Ok(Config(port:, bind:, db:, sources:, peers:))
 }
 
 fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
@@ -65,7 +79,7 @@ fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
       |> dict.to_list
       |> list.try_map(fn(entry) {
         let #(name, value) = entry
-        use _ <- result.try(instance_name(name))
+        use _ <- result.try(instance_name("source", name))
         case value {
           tom.Table(table) | tom.InlineTable(table) -> {
             let reader = source_reader(name, table)
@@ -79,11 +93,33 @@ fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
   }
 }
 
-fn instance_name(name: String) -> Result(Nil, String) {
+/// `[[peers]]` entries, each authenticating non-loopback requests bearing
+/// its token. Absent unless the operator opts a bridge into the mesh.
+fn peers(toml: Dict(String, Toml)) -> Result(List(PeerSpec), String) {
+  case tom.get(toml, ["peers"]) {
+    Error(_) -> Ok([])
+    Ok(tom.ArrayOfTables(tables)) -> list.try_map(tables, peer_spec)
+    Ok(_) -> Error("peers: must be an array of tables ([[peers]])")
+  }
+}
+
+fn peer_spec(table: Dict(String, Toml)) -> Result(PeerSpec, String) {
+  use name <- result.try(required_string(
+    Reader(table:, context: "peers"),
+    "name",
+  ))
+  use _ <- result.try(instance_name("peer", name))
+  use token <- result.try(token(Reader(table:, context: "peer " <> name)))
+  Ok(PeerSpec(name:, token:))
+}
+
+fn instance_name(kind: String, name: String) -> Result(Nil, String) {
   case whisper.valid_topic(name) {
     True -> Ok(Nil)
     False ->
-      Error("source " <> name <> ": name must be lowercase [a-z0-9_-] segments")
+      Error(
+        kind <> " " <> name <> ": name must be lowercase [a-z0-9_-] segments",
+      )
   }
 }
 

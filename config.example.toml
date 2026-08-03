@@ -4,10 +4,17 @@
 port = 7333
 db = "/absolute/path/reeds.db"
 
-# Loopback by default. The log is unauthenticated: anyone who can reach the
-# port can read every whisper and publish new ones, so widen this on purpose
-# (containers set REEDS_BIND=0.0.0.0 and restrict on the host side instead).
+# Loopback by default. Widen this on purpose (containers set
+# REEDS_BIND=0.0.0.0 and restrict on the host side instead); loopback stays
+# unauthenticated either way, so anything reaching the port from off-box
+# needs a token from [[peers]] below.
 # bind = "localhost"
+
+# Each [[peers]] entry authenticates non-loopback requests bearing its token
+# (Authorization: Bearer <token>). Names are self-asserted, not verified.
+# [[peers]]
+# name = "laptop"
+# token_env = "REEDS_PEER_LAPTOP_TOKEN"    # or token = "..." inline
 
 # Each [sources.<name>] section is an independent poller with its own diff
 # state, sender name, and credentials. Config is fail-fast: a malformed file or

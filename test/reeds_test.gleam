@@ -5,6 +5,8 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import gleeunit
+import mist
+import reeds/api
 import reeds/config
 import reeds/health
 import reeds/hub
@@ -165,7 +167,44 @@ pub fn config_rejects_wrong_typed_enabled_test() {
 pub fn config_defaults_test() {
   let assert Ok(parsed) = config.parse("")
   assert parsed
-    == config.Config(port: 7333, bind: "localhost", db: "reeds.db", sources: [])
+    == config.Config(
+      port: 7333,
+      bind: "localhost",
+      db: "reeds.db",
+      sources: [],
+      peers: [],
+    )
+}
+
+pub fn config_peers_test() {
+  let raw = "[[peers]]\nname = \"laptop\"\ntoken = \"secret\"\n"
+  let assert Ok(parsed) = config.parse(raw)
+  assert parsed.peers == [config.PeerSpec(name: "laptop", token: "secret")]
+}
+
+pub fn config_multiple_peers_test() {
+  let raw =
+    "[[peers]]\nname = \"laptop\"\ntoken = \"a\"\n\n"
+    <> "[[peers]]\nname = \"hub\"\ntoken = \"b\"\n"
+  let assert Ok(parsed) = config.parse(raw)
+  assert parsed.peers
+    == [
+      config.PeerSpec(name: "laptop", token: "a"),
+      config.PeerSpec(name: "hub", token: "b"),
+    ]
+}
+
+pub fn config_rejects_peer_without_token_test() {
+  let assert Error(_) = config.parse("[[peers]]\nname = \"laptop\"\n")
+}
+
+pub fn config_rejects_peer_without_name_test() {
+  let assert Error(_) = config.parse("[[peers]]\ntoken = \"secret\"\n")
+}
+
+pub fn config_rejects_peer_bad_name_test() {
+  let assert Error(_) =
+    config.parse("[[peers]]\nname = \"Bad Name\"\ntoken = \"secret\"\n")
 }
 
 /// Loopback unless explicitly widened: a default that exposed the log to the
@@ -616,6 +655,44 @@ fn raise(reason: String) -> a
 
 pub fn rescue_passes_a_value_through_test() {
   assert rescue(fn() { 42 }) == Ok(42)
+}
+
+pub fn is_loopback_ip_test() {
+  [
+    #(mist.IpV4(127, 0, 0, 1), True),
+    #(mist.IpV4(127, 1, 2, 3), True),
+    #(mist.IpV4(10, 0, 0, 5), False),
+    #(mist.IpV4(192, 168, 1, 1), False),
+    #(mist.IpV6(0, 0, 0, 0, 0, 0, 0, 1), True),
+    #(mist.IpV6(0xfe80, 0, 0, 0, 0, 0, 0, 1), False),
+  ]
+  |> list.each(fn(row) {
+    let #(ip, expected) = row
+    assert api.is_loopback_ip(ip) == expected
+  })
+}
+
+/// The token has to come from a scheme-prefixed `Authorization` header, not
+/// from bare presence of the right string somewhere in it.
+pub fn valid_bearer_test() {
+  let tokens = ["peer-a-token", "peer-b-token"]
+  [
+    #(Ok("Bearer peer-a-token"), True),
+    #(Ok("Bearer peer-b-token"), True),
+    #(Ok("Bearer wrong-token"), False),
+    #(Ok("bearer peer-a-token"), False),
+    #(Ok("peer-a-token"), False),
+    #(Ok(""), False),
+    #(Error(Nil), False),
+  ]
+  |> list.each(fn(row) {
+    let #(header, expected) = row
+    assert api.valid_bearer(header, tokens) == expected
+  })
+}
+
+pub fn valid_bearer_rejects_all_when_no_peers_configured_test() {
+  assert api.valid_bearer(Ok("Bearer anything"), []) == False
 }
 
 pub fn rescue_turns_a_raise_into_an_error_test() {

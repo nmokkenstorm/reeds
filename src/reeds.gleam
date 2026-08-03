@@ -38,8 +38,9 @@ pub fn main() {
   list.each(disabled, announce_disabled)
   let sources = list.map(active, build_source)
 
+  let peer_tokens = list.map(config.peers, fn(peer) { peer.token })
   let web =
-    mist.new(api.handler(hub_subject))
+    mist.new(api.handler(hub_subject, peer_tokens))
     |> mist.bind(bind)
     |> mist.port(port)
 

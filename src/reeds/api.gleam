@@ -10,6 +10,7 @@ import gleam/json
 import gleam/list
 import gleam/otp/actor
 import gleam/result
+import gleam/string
 import gleam/string_tree
 import mist.{type Connection, type ResponseData}
 import reeds/health as health_module
@@ -20,17 +21,59 @@ const max_body = 1_048_576
 
 const max_page = 1000
 
+/// Loopback requests are unauthenticated; anything else must carry a
+/// `Bearer` token matching a configured peer. Checked ahead of routing, so
+/// no route can be reached by accident.
 pub fn handler(
   hub: Subject(hub.Msg),
+  peer_tokens: List(String),
 ) -> fn(Request(Connection)) -> Response(ResponseData) {
   fn(req) {
-    case request.path_segments(req), req.method {
-      ["health"], Get -> health(hub)
-      ["t", topic], Post -> publish(hub, req, topic)
-      ["t", prefix], Get -> read_since(hub, req, prefix)
-      ["t", prefix, "events"], Get -> sse(hub, req, prefix)
-      _, _ -> json_response(404, "{\"error\":\"not found\"}")
+    case authorized(req, peer_tokens) {
+      False -> error_response(401, "unauthorized")
+      True ->
+        case request.path_segments(req), req.method {
+          ["health"], Get -> health(hub)
+          ["t", topic], Post -> publish(hub, req, topic)
+          ["t", prefix], Get -> read_since(hub, req, prefix)
+          ["t", prefix, "events"], Get -> sse(hub, req, prefix)
+          _, _ -> json_response(404, "{\"error\":\"not found\"}")
+        }
     }
+  }
+}
+
+fn authorized(req: Request(Connection), peer_tokens: List(String)) -> Bool {
+  let loopback = case mist.get_connection_info(req.body) {
+    Ok(info) -> is_loopback_ip(info.ip_address)
+    Error(_) -> False
+  }
+  loopback
+  || valid_bearer(request.get_header(req, "authorization"), peer_tokens)
+}
+
+/// 127.0.0.0/8 and the IPv6 loopback `::1`; nothing else counts, so a
+/// misconfigured reverse proxy on the same box cannot silently skip auth.
+pub fn is_loopback_ip(ip: mist.IpAddress) -> Bool {
+  case ip {
+    mist.IpV4(127, _, _, _) -> True
+    mist.IpV6(0, 0, 0, 0, 0, 0, 0, 1) -> True
+    _ -> False
+  }
+}
+
+pub fn valid_bearer(
+  header: Result(String, Nil),
+  peer_tokens: List(String),
+) -> Bool {
+  case header {
+    Error(_) -> False
+    Ok(value) ->
+      case string.split_once(value, on: " ") {
+        Ok(#("Bearer", token)) ->
+          token != "" && list.contains(peer_tokens, token)
+        _ -> False
+      }
   }
 }
 
