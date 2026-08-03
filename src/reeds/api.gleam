@@ -1,5 +1,6 @@
 import gleam/bit_array
 import gleam/bytes_tree
+import gleam/dict
 import gleam/dynamic/decode
 import gleam/erlang/process.{type Subject}
 import gleam/http.{Get, Post}
@@ -8,7 +9,7 @@ import gleam/http/response.{type Response}
 import gleam/int
 import gleam/json
 import gleam/list
-import gleam/option
+import gleam/option.{Some}
 import gleam/otp/actor
 import gleam/result
 import gleam/string
@@ -17,6 +18,7 @@ import mist.{type Connection, type ResponseData}
 import reeds/health as health_module
 import reeds/hub
 import reeds/whisper.{type Whisper}
+import reeds/wire
 
 const max_body = 1_048_576
 
@@ -38,6 +40,7 @@ pub fn handler(
           ["t", topic], Post -> publish(hub, req, topic)
           ["t", prefix], Get -> read_since(hub, req, prefix)
           ["t", prefix, "events"], Get -> sse(hub, req, prefix)
+          ["ingest"], Post -> ingest(hub, req)
           _, _ -> json_response(404, "{\"error\":\"not found\"}")
         }
     }
@@ -168,6 +171,64 @@ fn read_since(
       )
     }
   }
+}
+
+/// Receiving side of a peer push: body is a `/t/*?since=N` response verbatim
+/// (the same wire shape `wire.parse_since_response` already reads for the
+/// pull loop), so a pusher can forward its own read of `read_since` without
+/// reshaping it. `next_since`/`more` are the pusher's own cursor bookkeeping
+/// and irrelevant here. `cursors` is computed from the batch itself, not
+/// from `IngestForeign`'s accepted count, since a dedup no-op still confirms
+/// its origin_seq was received.
+fn ingest(
+  hub: Subject(hub.Msg),
+  req: Request(Connection),
+) -> Response(ResponseData) {
+  let parsed =
+    mist.read_body(req, max_body_limit: max_body)
+    |> result.replace_error("unreadable body")
+    |> result.try(fn(read) {
+      bit_array.to_string(read.body)
+      |> result.replace_error("body is not utf8")
+    })
+    |> result.try(wire.parse_since_response)
+  case parsed {
+    Error(reason) -> error_response(400, reason)
+    Ok(#(whispers, _next_since, _more)) ->
+      case
+        process.call(hub, waiting: 5000, sending: hub.IngestForeign(whispers, _))
+      {
+        Error(reason) -> error_response(500, reason)
+        Ok(accepted) ->
+          json_response(
+            200,
+            "{\"accepted\":"
+              <> int.to_string(accepted)
+              <> ",\"cursors\":"
+              <> cursors_json(whispers)
+              <> "}",
+          )
+      }
+  }
+}
+
+/// The highest `origin_seq` seen per origin in this batch, whether or not
+/// the whisper turned out to be a dedup no-op: a duplicate still confirms
+/// the pusher's cursor is caught up to that point.
+fn cursors_json(whispers: List(Whisper)) -> String {
+  whispers
+  |> list.fold(dict.new(), fn(cursors, w) {
+    dict.upsert(cursors, w.origin, fn(existing) {
+      case existing {
+        Some(seq) if seq >= w.origin_seq -> seq
+        _ -> w.origin_seq
+      }
+    })
+  })
+  |> dict.to_list
+  |> list.map(fn(pair) { #(pair.0, json.int(pair.1)) })
+  |> json.object
+  |> json.to_string
 }
 
 fn sse(

@@ -1,4 +1,6 @@
 import gleam/erlang/process
+import gleam/http
+import gleam/http/request
 import gleam/httpc
 import gleam/int
 import gleam/json
@@ -1113,6 +1115,69 @@ pub fn peer_pull_converges_and_never_round_trips_test() {
   let assert Ok(hub1_rows) =
     process.call(hub1, waiting: 1000, sending: hub.ReadSince("*", 0, 10, _))
   assert list.length(hub1_rows) == 2
+}
+
+/// POST /ingest accepts a since-response-shaped batch, dedups on each
+/// whisper's own (origin, origin_seq), assigns local seqs, and reports the
+/// per-origin high-water mark so a pusher can advance without a read
+/// round-trip.
+pub fn ingest_route_test() {
+  let #(hub, port) = start_bridge("hub1")
+  let whispers = [
+    Whisper(
+      seq: 9,
+      topic: "gh.pr.tools.7",
+      ts: 100,
+      sender: "gh",
+      kind: "pr.seen",
+      body: "{\"a\":1}",
+      origin: "hub2",
+      origin_seq: 5,
+      idem: Some("7:2026-07-28T09:00:00Z"),
+    ),
+    Whisper(
+      seq: 10,
+      topic: "agents.turtle",
+      ts: 200,
+      sender: "turtle",
+      kind: "note",
+      body: "{\"msg\":\"carry on\"}",
+      origin: "hub2",
+      origin_seq: 6,
+      idem: None,
+    ),
+  ]
+  let assert Ok(req) =
+    request.to("http://127.0.0.1:" <> int.to_string(port) <> "/ingest")
+  let req =
+    req
+    |> request.set_method(http.Post)
+    |> request.set_body(since_envelope(whispers, 6, False))
+
+  let assert Ok(resp) = httpc.send(req)
+  assert resp.status == 200
+  assert resp.body == "{\"accepted\":2,\"cursors\":{\"hub2\":6}}"
+
+  let assert Ok(stored) =
+    process.call(hub, waiting: 1000, sending: hub.ReadSince("*", 0, 10, _))
+  assert list.length(stored) == 2
+
+  // Resending the same batch is a dedup no-op: accepted drops to 0, but the
+  // cursor still reports 6 since that origin_seq really was received.
+  let assert Ok(resp2) = httpc.send(req)
+  assert resp2.body == "{\"accepted\":0,\"cursors\":{\"hub2\":6}}"
+}
+
+pub fn ingest_route_rejects_malformed_body_test() {
+  let #(_hub, port) = start_bridge("hub1")
+  let assert Ok(req) =
+    request.to("http://127.0.0.1:" <> int.to_string(port) <> "/ingest")
+  let req =
+    req
+    |> request.set_method(http.Post)
+    |> request.set_body("not json")
+  let assert Ok(resp) = httpc.send(req)
+  assert resp.status == 400
 }
 
 @external(erlang, "reeds_rescue_ffi", "rescue")
