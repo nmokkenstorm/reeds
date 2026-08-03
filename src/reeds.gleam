@@ -26,6 +26,7 @@ pub fn main() {
     envoy.get("REEDS_PORT")
     |> result.try(int.parse)
     |> result.unwrap(config.port)
+  let bind = envoy.get("REEDS_BIND") |> result.unwrap(config.bind)
 
   let assert Ok(conn) = store.open(db_path)
   io.println("reeds: " <> db_path <> " (sqlite " <> store.version(conn) <> ")")
@@ -39,7 +40,7 @@ pub fn main() {
 
   let web =
     mist.new(api.handler(hub_subject))
-    |> mist.bind("localhost")
+    |> mist.bind(bind)
     |> mist.port(port)
 
   let assert Ok(_) =
@@ -64,7 +65,9 @@ pub fn main() {
       }),
     ),
   )
-  io.println("reeds: listening on http://localhost:" <> int.to_string(port))
+  io.println(
+    "reeds: listening on http://" <> bind <> ":" <> int.to_string(port),
+  )
 
   process.sleep_forever()
 }

@@ -1,0 +1,18 @@
+[Unit]
+Description=reeds whisper network
+Documentation=https://github.com/nmokkenstorm/reeds
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Points at an erlang-shipment, so the Gleam toolchain is a build-time
+# dependency only and the unit does not care where the checkout lives.
+ExecStart=@INSTALL@/entrypoint.sh run
+Environment=REEDS_CONFIG=%h/.config/reeds/config.toml
+Environment=REEDS_DB=%h/.local/share/reeds/reeds.db
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

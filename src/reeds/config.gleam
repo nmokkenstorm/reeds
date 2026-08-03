@@ -9,7 +9,7 @@ import simplifile
 import tom.{type Toml}
 
 pub type Config {
-  Config(port: Int, db: String, sources: List(SourceSpec))
+  Config(port: Int, bind: String, db: String, sources: List(SourceSpec))
 }
 
 pub type SourceSpec {
@@ -49,9 +49,12 @@ pub fn parse(raw: String) -> Result(Config, String) {
   )
   let root = Reader(table: toml, context: "config")
   use port <- result.try(optional_int(root, "port", 7333))
+  // Loopback by default: the log is unauthenticated, so a bind address is an
+  // explicit decision, never something a default quietly makes for you.
+  use bind <- result.try(optional_string(root, "bind", "localhost"))
   use db <- result.try(optional_string(root, "db", "reeds.db"))
   use sources <- result.try(sources(toml))
-  Ok(Config(port:, db:, sources:))
+  Ok(Config(port:, bind:, db:, sources:))
 }
 
 fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {

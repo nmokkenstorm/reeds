@@ -162,7 +162,20 @@ pub fn config_rejects_wrong_typed_enabled_test() {
 
 pub fn config_defaults_test() {
   let assert Ok(parsed) = config.parse("")
-  assert parsed == config.Config(port: 7333, db: "reeds.db", sources: [])
+  assert parsed
+    == config.Config(port: 7333, bind: "localhost", db: "reeds.db", sources: [])
+}
+
+/// Loopback unless explicitly widened: a default that exposed the log to the
+/// network would be a security decision made by omission.
+pub fn config_bind_test() {
+  [#("", "localhost"), #("bind = \"0.0.0.0\"\n", "0.0.0.0")]
+  |> list.each(fn(row) {
+    let #(raw, expected) = row
+    let assert Ok(parsed) = config.parse(raw)
+    assert parsed.bind == expected
+  })
+  let assert Error(_) = config.parse("bind = 7333\n")
 }
 
 pub fn config_rejects_kindless_source_test() {

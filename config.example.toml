@@ -1,8 +1,13 @@
 # Copy to ~/.config/reeds/config.toml (or point REEDS_CONFIG at it).
-# REEDS_DB and REEDS_PORT override the values here.
+# REEDS_DB, REEDS_PORT and REEDS_BIND override the values here.
 
 port = 7333
 db = "/absolute/path/reeds.db"
+
+# Loopback by default. The log is unauthenticated: anyone who can reach the
+# port can read every whisper and publish new ones, so widen this on purpose
+# (containers set REEDS_BIND=0.0.0.0 and restrict on the host side instead).
+# bind = "localhost"
 
 # Each [sources.<name>] section is an independent poller with its own diff
 # state, sender name, and credentials. Config is fail-fast: a malformed file or
