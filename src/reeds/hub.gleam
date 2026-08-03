@@ -35,6 +35,13 @@ pub type Msg {
   RecordPoll(name: String, feeds: List(health.FeedOutcome), reply: Subject(Int))
   Health(reply: Subject(Result(List(health.SourceHealth), String)))
   SetRoster(sources: List(health.Registration))
+  /// A peer never pulled from starts at 0, same as `since=0` on the read API.
+  GetPeerCursor(peer: String, reply: Subject(Int))
+  PutPeerCursor(peer: String, cursor: Int)
+  /// Ingest whispers whose origin/origin_seq/idem were already assigned by
+  /// their origin bridge; replies with how many were new rows rather than
+  /// dedup no-ops, purely for the caller's own logging.
+  IngestForeign(whispers: List(Whisper), reply: Subject(Result(Int, String)))
 }
 
 type Sub {
@@ -113,6 +120,17 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
         )
       actor.continue(State(..state, roster: sources))
     }
+    GetPeerCursor(peer, reply) -> {
+      store.get_peer_cursor(state.conn, peer)
+      |> result.unwrap(0)
+      |> process.send(reply, _)
+      actor.continue(state)
+    }
+    PutPeerCursor(peer, cursor) -> {
+      let _ = store.put_peer_cursor(state.conn, peer, cursor)
+      actor.continue(state)
+    }
+    IngestForeign(whispers, reply) -> ingest_foreign(state, whispers, reply)
   }
 }
 
@@ -252,6 +270,45 @@ fn emit(
           #(State(..state, subs: live), Ok(seq))
         }
       }
+    }
+  }
+}
+
+/// Ingest a batch from a peer pull. Each whisper keeps its own origin,
+/// origin_seq, and idem verbatim; only the local seq (assigned inside
+/// `append_foreign`) and fan-out are this bridge's to give. Stops and
+/// reports the first error, since a resumed pull will safely re-send
+/// whatever this batch did not reach (dedup makes the retry a no-op).
+fn ingest_foreign(
+  state: State,
+  whispers: List(Whisper),
+  reply: Subject(Result(Int, String)),
+) -> actor.Next(State, Msg) {
+  let result =
+    list.try_fold(whispers, #(state, 0), fn(acc, w) {
+      let #(state, count) = acc
+      case store.append_foreign(state.conn, w) {
+        Error(message) -> Error(message)
+        Ok(None) -> Ok(#(state, count))
+        Ok(Some(seq)) -> {
+          let live =
+            list.filter(state.subs, fn(sub) { process.is_alive(sub.pid) })
+          let published = whisper.Whisper(..w, seq:)
+          live
+          |> list.filter(fn(sub) { whisper.matches(w.topic, sub.prefix) })
+          |> list.each(fn(sub) { process.send(sub.subject, published) })
+          Ok(#(State(..state, subs: live), count + 1))
+        }
+      }
+    })
+  case result {
+    Error(message) -> {
+      process.send(reply, Error(message))
+      actor.continue(state)
+    }
+    Ok(#(state, count)) -> {
+      process.send(reply, Ok(count))
+      actor.continue(state)
     }
   }
 }

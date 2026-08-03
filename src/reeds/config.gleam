@@ -16,6 +16,7 @@ pub type Config {
     db: String,
     bridge_name: String,
     sources: List(SourceSpec),
+    peers: List(PeerSpec),
   )
 }
 
@@ -28,14 +29,38 @@ pub type SourceSpec {
   )
 }
 
+/// `pull` tails the peer's read API and ingests; `push` batches this
+/// bridge's whispers to the peer's `/ingest`; `both` runs both halves.
+pub type PeerMode {
+  Pull
+  Push
+  Both
+}
+
+pub type PeerSpec {
+  PeerSpec(
+    name: String,
+    url: String,
+    token: String,
+    mode: PeerMode,
+    interval_ms: Int,
+    backoff_cap_ms: Int,
+  )
+}
+
 /// A table plus the context every error it produces is labelled with, so a
-/// source module cannot mislabel its own failures or forget the prefix.
+/// source or peer module cannot mislabel its own failures or forget the
+/// prefix.
 pub opaque type Reader {
   Reader(table: Dict(String, Toml), context: String)
 }
 
 pub fn source_reader(name: String, table: Dict(String, Toml)) -> Reader {
   Reader(table:, context: "source " <> name)
+}
+
+pub fn peer_reader(name: String, table: Dict(String, Toml)) -> Reader {
+  Reader(table:, context: "peer " <> name)
 }
 
 /// Load config from a TOML file. Only a genuinely absent file yields the
@@ -62,7 +87,8 @@ pub fn parse(raw: String) -> Result(Config, String) {
   use db <- result.try(optional_string(root, "db", "reeds.db"))
   use bridge_name <- result.try(bridge_name(toml))
   use sources <- result.try(sources(toml))
-  Ok(Config(port:, bind:, db:, bridge_name:, sources:))
+  use peers <- result.try(peers(toml))
+  Ok(Config(port:, bind:, db:, bridge_name:, sources:, peers:))
 }
 
 /// The origin name this bridge stamps on its own whispers. Explicit
@@ -103,6 +129,51 @@ fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
           _ -> Error("source " <> name <> ": not a table")
         }
       })
+  }
+}
+
+/// Peers this bridge syncs with. A cursor is a per-peer thing regardless of
+/// mode, so every mode is parsed the same way; only the pull loop cares
+/// whether `mode` includes pulling.
+fn peers(toml: Dict(String, Toml)) -> Result(List(PeerSpec), String) {
+  case tom.get_table(toml, ["peers"]) {
+    Error(_) -> Ok([])
+    Ok(tables) ->
+      tables
+      |> dict.to_list
+      |> list.try_map(fn(entry) {
+        let #(name, value) = entry
+        use _ <- result.try(instance_name(name))
+        case value {
+          tom.Table(table) | tom.InlineTable(table) -> {
+            let reader = peer_reader(name, table)
+            use url <- result.try(required_string(reader, "url"))
+            use token <- result.try(token(reader))
+            use mode <- result.try(peer_mode(reader))
+            use interval_ms <- result.try(interval_ms(reader))
+            use backoff_cap_ms <- result.try(backoff_cap_ms(reader, interval_ms))
+            Ok(PeerSpec(
+              name:,
+              url:,
+              token:,
+              mode:,
+              interval_ms:,
+              backoff_cap_ms:,
+            ))
+          }
+          _ -> Error("peer " <> name <> ": not a table")
+        }
+      })
+  }
+}
+
+fn peer_mode(reader: Reader) -> Result(PeerMode, String) {
+  use raw <- result.try(optional_string(reader, "mode", "pull"))
+  case raw {
+    "pull" -> Ok(Pull)
+    "push" -> Ok(Push)
+    "both" -> Ok(Both)
+    _ -> Error(problem(reader, "mode", "must be 'pull', 'push', or 'both'"))
   }
 }
 

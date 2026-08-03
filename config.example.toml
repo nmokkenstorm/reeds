@@ -37,3 +37,13 @@ owner = "someone"
 repos = ["some-repo"]
 enabled = false
 token_env = "GITHUB_TOKEN"
+
+# Each [peers.<name>] section is another bridge this one syncs with. `pull`
+# tails the peer's `/t/*?since=` read API and ingests, resuming from a cursor
+# persisted per peer; `push` and `both` are configured the same way but the
+# push half does not exist yet, so `push`-only peers currently do nothing.
+# [peers.homelab]
+# url = "http://homelab.local:7333"
+# token_env = "REEDS_PEER_HOMELAB_TOKEN"   # or token = "..." inline
+# mode = "pull"                            # pull (default) | push | both
+# interval_seconds = 30                    # optional, default 30, minimum 5
