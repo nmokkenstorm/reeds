@@ -9,6 +9,12 @@ db = "/absolute/path/reeds.db"
 # (containers set REEDS_BIND=0.0.0.0 and restrict on the host side instead).
 # bind = "localhost"
 
+# This bridge's identity in the mesh: stamped as `origin` on every whisper it
+# publishes, and referenced by peers as their pull cursor key. Defaults to the
+# host's hostname; set it explicitly if that is not stable or not unique.
+# [bridge]
+# name = "laptop"
+
 # Each [sources.<name>] section is an independent poller with its own diff
 # state, sender name, and credentials. Config is fail-fast: a malformed file or
 # a section that fails validation refuses the whole boot. Set enabled = false to

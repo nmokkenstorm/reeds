@@ -17,10 +17,13 @@ import reeds/source.{type Draft, type Poll, Draft, Poll}
 @external(erlang, "reeds_rescue_ffi", "rescue")
 fn rescue(thunk: fn() -> a) -> Result(a, String)
 
-/// A pre-rendered upstream record: stable id, change fingerprint, and the
-/// whisper body it becomes when it is new or changed.
+/// A pre-rendered upstream record: stable id, change fingerprint, the mesh
+/// dedup fingerprint of the underlying fact (`idem`, distinct from
+/// `fingerprint`: two observers computing it independently must agree, so it
+/// excludes anything observer-local), and the whisper body it becomes when
+/// it is new or changed.
 pub type Item {
-  Item(id: String, fingerprint: String, body: String)
+  Item(id: String, fingerprint: String, idem: String, body: String)
 }
 
 /// One polled collection within an upstream (PRs, pipeline runs). `ns` is
@@ -162,9 +165,12 @@ fn draft(
       <> item.id,
     kind: ns <> "." <> verb,
     body: item.body,
+    idem: Some(item.idem),
   )
 }
 
+/// Two observers noticing the same item vanish should collapse to one
+/// whisper; the topic already scopes item identity, so a constant is enough.
 fn gone_draft(prefix: String, seen_key: String) -> Draft {
   let #(ns, repo, id) = case string.split(seen_key, ":") {
     [ns, rest] ->
@@ -180,6 +186,7 @@ fn gone_draft(prefix: String, seen_key: String) -> Draft {
     body: json.to_string(
       json.object([#("repo", json.string(repo)), #("id", json.string(id))]),
     ),
+    idem: Some("gone"),
   )
 }
 

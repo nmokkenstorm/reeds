@@ -7,6 +7,7 @@ import gleam/string
 import gleeunit
 import reeds/config
 import reeds/health
+import reeds/host
 import reeds/hub
 import reeds/sources/bitbucket
 import reeds/sources/github
@@ -14,6 +15,8 @@ import reeds/sources/gitlab
 import reeds/sources/poller
 import reeds/store
 import reeds/whisper.{Whisper}
+import simplifile
+import sqlight
 
 pub fn main() {
   gleeunit.main()
@@ -63,14 +66,34 @@ pub fn envelope_test() {
       sender: "turtle",
       kind: "note",
       body: "{\"msg\":\"carry on\"}",
+      origin: "hub1",
+      origin_seq: 7,
+      idem: None,
     )
   assert whisper.to_json_string(w)
-    == "{\"seq\":7,\"topic\":\"a.b\",\"ts\":123,\"sender\":\"turtle\",\"kind\":\"note\",\"body\":{\"msg\":\"carry on\"}}"
+    == "{\"seq\":7,\"topic\":\"a.b\",\"ts\":123,\"sender\":\"turtle\",\"kind\":\"note\",\"origin\":\"hub1\",\"origin_seq\":7,\"idem\":null,\"body\":{\"msg\":\"carry on\"}}"
+}
+
+pub fn envelope_with_idem_test() {
+  let w =
+    Whisper(
+      seq: 1,
+      topic: "gh.pr.tools.7",
+      ts: 1,
+      sender: "gh",
+      kind: "pr.seen",
+      body: "{}",
+      origin: "hub1",
+      origin_seq: 1,
+      idem: Some("7:2026-07-28T09:00:00Z"),
+    )
+  assert whisper.to_json_string(w)
+    == "{\"seq\":1,\"topic\":\"gh.pr.tools.7\",\"ts\":1,\"sender\":\"gh\",\"kind\":\"pr.seen\",\"origin\":\"hub1\",\"origin_seq\":1,\"idem\":\"7:2026-07-28T09:00:00Z\",\"body\":{}}"
 }
 
 pub fn store_roundtrip_test() {
-  let assert Ok(conn) = store.open(":memory:")
-  let assert Ok(1) =
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
+  let assert Ok(store.Inserted(seq: 1, origin_seq: 1)) =
     store.append(
       conn,
       topic: "a.b",
@@ -78,8 +101,10 @@ pub fn store_roundtrip_test() {
       sender: "t",
       kind: "note",
       body: "{}",
+      origin: "hub1",
+      idem: None,
     )
-  let assert Ok(2) =
+  let assert Ok(store.Inserted(seq: 2, origin_seq: 2)) =
     store.append(
       conn,
       topic: "a.c",
@@ -87,8 +112,10 @@ pub fn store_roundtrip_test() {
       sender: "t",
       kind: "note",
       body: "{}",
+      origin: "hub1",
+      idem: None,
     )
-  let assert Ok(3) =
+  let assert Ok(store.Inserted(seq: 3, origin_seq: 3)) =
     store.append(
       conn,
       topic: "ax",
@@ -96,11 +123,16 @@ pub fn store_roundtrip_test() {
       sender: "t",
       kind: "note",
       body: "{}",
+      origin: "hub1",
+      idem: None,
     )
 
   let assert Ok([one, two]) =
     store.read_since(conn, prefix: "a", since: 0, limit: 10)
   assert one.topic == "a.b"
+  assert one.origin == "hub1"
+  assert one.origin_seq == 1
+  assert one.idem == None
   assert two.topic == "a.c"
 
   let assert Ok([only]) =
@@ -111,8 +143,123 @@ pub fn store_roundtrip_test() {
     store.read_since(conn, prefix: "nope", since: 0, limit: 10)
 }
 
+/// Re-publishing a source fact with the same `(topic, idem)` no-ops rather
+/// than erroring or inserting a second row, and reports the existing seq.
+pub fn store_idem_dedup_test() {
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
+  let assert Ok(store.Inserted(seq: 1, origin_seq: 1)) =
+    store.append(
+      conn,
+      topic: "gh.pr.tools.7",
+      ts: 1,
+      sender: "gh",
+      kind: "pr.seen",
+      body: "{}",
+      origin: "hub1",
+      idem: Some("7:2026-07-28T09:00:00Z"),
+    )
+  let assert Ok(store.Deduped(seq: 1)) =
+    store.append(
+      conn,
+      topic: "gh.pr.tools.7",
+      ts: 2,
+      sender: "gh",
+      kind: "pr.updated",
+      body: "{\"different\":true}",
+      origin: "hub1",
+      idem: Some("7:2026-07-28T09:00:00Z"),
+    )
+  let assert Ok([only]) =
+    store.read_since(conn, prefix: "*", since: 0, limit: 10)
+  assert only.kind == "pr.seen"
+
+  // A different topic with the same idem string is not the same fact. `seq`
+  // may skip a value here: SQLite's AUTOINCREMENT burns a rowid even for an
+  // insert that a later UNIQUE conflict causes it to ignore.
+  let assert Ok(store.Inserted(origin_seq: 2, ..)) =
+    store.append(
+      conn,
+      topic: "gh.pr.tools.8",
+      ts: 3,
+      sender: "gh",
+      kind: "pr.seen",
+      body: "{}",
+      origin: "hub1",
+      idem: Some("7:2026-07-28T09:00:00Z"),
+    )
+}
+
+/// `origin_seq` is a per-origin counter computed alongside `seq`, so two
+/// origins interleaving in one log each count from their own one.
+pub fn store_origin_seq_per_origin_test() {
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
+  let assert Ok(store.Inserted(seq: 1, origin_seq: 1)) =
+    store.append(
+      conn,
+      topic: "a",
+      ts: 1,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+      origin: "hub1",
+      idem: None,
+    )
+  let assert Ok(Some(2)) =
+    store.append_foreign(
+      conn,
+      Whisper(
+        seq: 0,
+        topic: "b",
+        ts: 2,
+        sender: "t",
+        kind: "note",
+        body: "{}",
+        origin: "hub2",
+        origin_seq: 41,
+        idem: None,
+      ),
+    )
+  let assert Ok(store.Inserted(seq: 3, origin_seq: 2)) =
+    store.append(
+      conn,
+      topic: "a",
+      ts: 3,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+      origin: "hub1",
+      idem: None,
+    )
+}
+
+/// Foreign ingest preserves origin/origin_seq/idem verbatim; a duplicate
+/// `(origin, origin_seq)` no-ops instead of erroring, which is what makes a
+/// resumed pull safe to replay.
+pub fn store_append_foreign_dedup_test() {
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
+  let w =
+    Whisper(
+      seq: 0,
+      topic: "gl.mr.app.14",
+      ts: 5,
+      sender: "gl",
+      kind: "mr.seen",
+      body: "{}",
+      origin: "hub2",
+      origin_seq: 9,
+      idem: Some("14:2026-07-28T11:00:00Z"),
+    )
+  let assert Ok(Some(seq)) = store.append_foreign(conn, w)
+  let assert Ok(None) = store.append_foreign(conn, w)
+  let assert Ok([only]) =
+    store.read_since(conn, prefix: "*", since: 0, limit: 10)
+  assert only.seq == seq
+  assert only.origin == "hub2"
+  assert only.origin_seq == 9
+}
+
 pub fn store_rejects_invalid_json_test() {
-  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
   let assert Error(_) =
     store.append(
       conn,
@@ -121,11 +268,64 @@ pub fn store_rejects_invalid_json_test() {
       sender: "t",
       kind: "note",
       body: "not json",
+      origin: "hub1",
+      idem: None,
     )
 }
 
+/// A database created before origin tagging existed gets its rows
+/// backfilled (`origin = <bridge.name>`, `origin_seq = seq`) rather than
+/// refusing to open, and the mesh columns work from then on.
+pub fn store_migrates_legacy_schema_test() {
+  let path = "/tmp/reeds_test_legacy_schema.db"
+  let _ = simplifile.delete(path)
+  let assert Ok(conn) = sqlight.open(path)
+  let assert Ok(Nil) =
+    sqlight.exec(
+      "create table messages(
+         seq    integer primary key autoincrement,
+         topic  text not null,
+         ts     integer not null,
+         sender text not null,
+         kind   text not null,
+         body   text not null check (json_valid(body))
+       ) strict;",
+      conn,
+    )
+  let assert Ok(Nil) =
+    sqlight.exec(
+      "insert into messages(topic, ts, sender, kind, body)
+       values ('legacy.a', 1, 't', 'note', '{}');",
+      conn,
+    )
+  let assert Ok(Nil) = sqlight.close(conn)
+
+  let assert Ok(migrated) = store.open(path, origin: "hub1")
+  let assert Ok([row]) =
+    store.read_since(migrated, prefix: "*", since: 0, limit: 10)
+  assert row.topic == "legacy.a"
+  assert row.origin == "hub1"
+  assert row.origin_seq == row.seq
+  assert row.idem == None
+
+  let assert Ok(store.Inserted(seq: _, origin_seq: next_origin_seq)) =
+    store.append(
+      migrated,
+      topic: "legacy.b",
+      ts: 2,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+      origin: "hub1",
+      idem: None,
+    )
+  assert next_origin_seq == row.origin_seq + 1
+  let assert Ok(Nil) = sqlight.close(migrated)
+  let assert Ok(Nil) = simplifile.delete(path)
+}
+
 pub fn source_state_test() {
-  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
   let assert Ok(None) = store.get_source_state(conn, "bitbucket")
   let assert Ok(Nil) =
     store.put_source_state(conn, "bitbucket", "{\"a\":\"1\"}")
@@ -165,7 +365,27 @@ pub fn config_rejects_wrong_typed_enabled_test() {
 pub fn config_defaults_test() {
   let assert Ok(parsed) = config.parse("")
   assert parsed
-    == config.Config(port: 7333, bind: "localhost", db: "reeds.db", sources: [])
+    == config.Config(
+      port: 7333,
+      bind: "localhost",
+      db: "reeds.db",
+      bridge_name: host.hostname(),
+      sources: [],
+    )
+}
+
+/// Two bridges sharing a name would collide under `UNIQUE(origin,
+/// origin_seq)`, so unlike every other default this one cannot be a fixed
+/// literal.
+pub fn config_bridge_name_test() {
+  let assert Ok(default) = config.parse("")
+  assert default.bridge_name == host.hostname()
+
+  let assert Ok(named) = config.parse("[bridge]\nname = \"laptop\"\n")
+  assert named.bridge_name == "laptop"
+
+  let assert Error(_) = config.parse("[bridge]\nname = \"\"\n")
+  let assert Error(_) = config.parse("[bridge]\nname = 7\n")
 }
 
 /// Loopback unless explicitly widened: a default that exposed the log to the
@@ -248,6 +468,7 @@ pub fn bitbucket_prs_decoder_test() {
     json.parse(from: fixture, using: bitbucket.prs_decoder("api"))
   assert item.id == "12"
   assert item.fingerprint == "OPEN|2026-07-28T10:00:00Z"
+  assert item.idem == "12:2026-07-28T10:00:00Z"
   assert item.body
     == "{\"repo\":\"api\",\"id\":12,\"title\":\"fix the thing\",\"state\":\"OPEN\",\"updated_on\":\"2026-07-28T10:00:00Z\"}"
 }
@@ -262,7 +483,9 @@ pub fn bitbucket_pipelines_decoder_test() {
     json.parse(from: fixture, using: bitbucket.pipelines_decoder("api"))
   assert done.id == "512"
   assert done.fingerprint == "COMPLETED|SUCCESSFUL"
+  assert done.idem == "512:COMPLETED:SUCCESSFUL"
   assert running.fingerprint == "IN_PROGRESS|"
+  assert running.idem == "513:IN_PROGRESS:"
 }
 
 pub fn github_prs_decoder_test() {
@@ -272,6 +495,7 @@ pub fn github_prs_decoder_test() {
     json.parse(from: fixture, using: github.prs_decoder("tools"))
   assert item.id == "7"
   assert item.fingerprint == "open|2026-07-28T09:00:00Z"
+  assert item.idem == "7:2026-07-28T09:00:00Z"
 }
 
 pub fn github_runs_decoder_test() {
@@ -284,7 +508,9 @@ pub fn github_runs_decoder_test() {
     json.parse(from: fixture, using: github.runs_decoder("tools"))
   assert done.id == "9100000001"
   assert done.fingerprint == "completed|success"
+  assert done.idem == "9100000001:completed:success"
   assert running.fingerprint == "in_progress|"
+  assert running.idem == "9100000002:in_progress:"
 }
 
 pub fn gitlab_from_spec_test() {
@@ -312,6 +538,7 @@ pub fn gitlab_mrs_decoder_test() {
     json.parse(from: fixture, using: gitlab.mrs_decoder("app"))
   assert item.id == "14"
   assert item.fingerprint == "opened|2026-07-28T11:00:00Z"
+  assert item.idem == "14:2026-07-28T11:00:00Z"
   assert item.body
     == "{\"repo\":\"app\",\"id\":14,\"title\":\"wire the thing\",\"state\":\"opened\",\"updated_on\":\"2026-07-28T11:00:00Z\"}"
 }
@@ -326,7 +553,9 @@ pub fn gitlab_pipelines_decoder_test() {
     json.parse(from: fixture, using: gitlab.pipelines_decoder("app"))
   assert done.id == "3021"
   assert done.fingerprint == "success"
+  assert done.idem == "3021:success"
   assert running.fingerprint == "running"
+  assert running.idem == "3022:running"
   assert running.body
     == "{\"repo\":\"app\",\"pipeline\":3022,\"state\":\"running\",\"branch\":\"\"}"
 }
@@ -449,7 +678,7 @@ pub fn health_first_clean_poll_is_silent_test() {
 }
 
 pub fn store_health_roundtrip_test() {
-  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
   let failing = [health.Reached("pr:a"), health.Unreachable("run:a", "401")]
 
   let assert Ok(Nil) = store.record_poll(conn, "gh", failing, 1000)
@@ -476,7 +705,7 @@ pub fn store_health_roundtrip_test() {
 }
 
 pub fn store_health_prunes_stale_feeds_test() {
-  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
   let assert Ok(Nil) =
     store.record_poll(
       conn,
@@ -494,7 +723,7 @@ pub fn store_health_prunes_stale_feeds_test() {
 }
 
 pub fn store_health_prunes_removed_sources_test() {
-  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
   let assert Ok(Nil) =
     store.record_poll(conn, "gone", [health.Reached("pr:a")], 1000)
   let assert Ok(Nil) = store.prune_sources(conn, ["still-here"])
@@ -502,8 +731,8 @@ pub fn store_health_prunes_removed_sources_test() {
 }
 
 pub fn hub_record_poll_whispers_transitions_test() {
-  let assert Ok(conn) = store.open(":memory:")
-  let assert Ok(started) = hub.start(conn)
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
+  let assert Ok(started) = hub.start(conn, "hub1")
   let h = started.data
   process.send(h, hub.SetRoster([health.Registration("gh", "github", True)]))
 
@@ -516,8 +745,11 @@ pub fn hub_record_poll_whispers_transitions_test() {
     process.call(h, waiting: 1000, sending: hub.RecordPoll("gh", failing, _))
   let assert Ok(first) = process.receive(inbox, 1000)
   assert first.kind == "source.down"
+  assert first.idem == Some("gh:down")
 
-  // Identical failure: the streak climbs, the network stays quiet.
+  // Identical failure: the streak climbs, the network stays quiet. A second
+  // bridge observing the same transition would compute the same idem, so
+  // this also exercises that a repeat never gets a second local seq.
   let assert 2 =
     process.call(h, waiting: 1000, sending: hub.RecordPoll("gh", failing, _))
   let assert Error(_) = process.receive(inbox, 100)
@@ -535,8 +767,8 @@ pub fn hub_record_poll_whispers_transitions_test() {
 /// The report comes from the roster, so a configured source is never simply
 /// absent from it.
 pub fn hub_health_reports_roster_test() {
-  let assert Ok(conn) = store.open(":memory:")
-  let assert Ok(started) = hub.start(conn)
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
+  let assert Ok(started) = hub.start(conn, "hub1")
   let h = started.data
   process.send(
     h,
@@ -563,8 +795,8 @@ pub fn hub_health_reports_roster_test() {
 }
 
 pub fn hub_publish_subscribe_test() {
-  let assert Ok(conn) = store.open(":memory:")
-  let assert Ok(started) = hub.start(conn)
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
+  let assert Ok(started) = hub.start(conn, "hub1")
   let h = started.data
 
   let assert Ok(1) =
@@ -573,6 +805,7 @@ pub fn hub_publish_subscribe_test() {
       "t",
       "note",
       "{\"n\":1}",
+      None,
       _,
     ))
 
@@ -588,6 +821,7 @@ pub fn hub_publish_subscribe_test() {
       "t",
       "note",
       "{\"n\":2}",
+      None,
       _,
     ))
   let assert Ok(live) = process.receive(inbox, 1000)
@@ -599,6 +833,7 @@ pub fn hub_publish_subscribe_test() {
       "t",
       "note",
       "{}",
+      None,
       _,
     ))
   let assert Error(Nil) = process.receive(inbox, 100)

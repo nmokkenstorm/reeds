@@ -8,6 +8,7 @@ import gleam/http/response.{type Response}
 import gleam/int
 import gleam/json
 import gleam/list
+import gleam/option
 import gleam/otp/actor
 import gleam/result
 import gleam/string_tree
@@ -77,6 +78,7 @@ fn publish(
               sender,
               kind,
               body,
+              option.None,
               _,
             ))
           {

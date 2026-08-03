@@ -4,12 +4,19 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import reeds/host
 import reeds/whisper
 import simplifile
 import tom.{type Toml}
 
 pub type Config {
-  Config(port: Int, bind: String, db: String, sources: List(SourceSpec))
+  Config(
+    port: Int,
+    bind: String,
+    db: String,
+    bridge_name: String,
+    sources: List(SourceSpec),
+  )
 }
 
 pub type SourceSpec {
@@ -53,8 +60,28 @@ pub fn parse(raw: String) -> Result(Config, String) {
   // explicit decision, never something a default quietly makes for you.
   use bind <- result.try(optional_string(root, "bind", "localhost"))
   use db <- result.try(optional_string(root, "db", "reeds.db"))
+  use bridge_name <- result.try(bridge_name(toml))
   use sources <- result.try(sources(toml))
-  Ok(Config(port:, bind:, db:, sources:))
+  Ok(Config(port:, bind:, db:, bridge_name:, sources:))
+}
+
+/// The origin name this bridge stamps on its own whispers. Explicit
+/// `[bridge] name`, or this host's hostname: unlike every other default here,
+/// it cannot be a fixed literal, since two bridges sharing one would collide
+/// under `UNIQUE(origin, origin_seq)`.
+fn bridge_name(toml: Dict(String, Toml)) -> Result(String, String) {
+  case tom.get_string(toml, ["bridge", "name"]) {
+    Ok("") -> Error("config: 'bridge.name' is empty")
+    Ok(name) -> Ok(name)
+    Error(tom.NotFound(_)) -> Ok(host.hostname())
+    Error(tom.WrongType(_, expected, got)) ->
+      Error(
+        "config: 'bridge.name' should be "
+        <> string.lowercase(expected)
+        <> ", got "
+        <> string.lowercase(got),
+      )
+  }
 }
 
 fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
