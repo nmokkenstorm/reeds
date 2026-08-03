@@ -84,6 +84,7 @@ fn pr_decoder(repo: String) -> decode.Decoder(poller.Item) {
   decode.success(poller.Item(
     id: int.to_string(number),
     fingerprint: state <> "|" <> updated_at,
+    idem: int.to_string(number) <> ":" <> updated_at,
     body: json.to_string(
       json.object([
         #("repo", json.string(repo)),
@@ -115,6 +116,7 @@ fn run_decoder(repo: String) -> decode.Decoder(poller.Item) {
   decode.success(poller.Item(
     id: int.to_string(id),
     fingerprint: status <> "|" <> conclusion,
+    idem: int.to_string(id) <> ":" <> status <> ":" <> conclusion,
     body: json.to_string(
       json.object([
         #("repo", json.string(repo)),

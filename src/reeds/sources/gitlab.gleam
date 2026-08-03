@@ -85,6 +85,7 @@ fn mr_decoder(repo: String) -> decode.Decoder(poller.Item) {
   decode.success(poller.Item(
     id: int.to_string(iid),
     fingerprint: state <> "|" <> updated_at,
+    idem: int.to_string(iid) <> ":" <> updated_at,
     body: json.to_string(
       json.object([
         #("repo", json.string(repo)),
@@ -112,6 +113,7 @@ fn pipeline_decoder(repo: String) -> decode.Decoder(poller.Item) {
   decode.success(poller.Item(
     id: int.to_string(id),
     fingerprint: status,
+    idem: int.to_string(id) <> ":" <> status,
     body: json.to_string(
       json.object([
         #("repo", json.string(repo)),

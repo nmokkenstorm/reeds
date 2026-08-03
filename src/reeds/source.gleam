@@ -34,7 +34,7 @@ pub type Poll {
 }
 
 pub type Draft {
-  Draft(topic: String, kind: String, body: String)
+  Draft(topic: String, kind: String, body: String, idem: Option(String))
 }
 
 pub opaque type Msg {
@@ -86,6 +86,7 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
         source.name,
         draft.kind,
         draft.body,
+        draft.idem,
         _,
       ))
       |> result.map_error(fn(error) {

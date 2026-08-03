@@ -28,8 +28,16 @@ pub fn main() {
     |> result.unwrap(config.port)
   let bind = envoy.get("REEDS_BIND") |> result.unwrap(config.bind)
 
-  let assert Ok(conn) = store.open(db_path)
-  io.println("reeds: " <> db_path <> " (sqlite " <> store.version(conn) <> ")")
+  let assert Ok(conn) = store.open(db_path, origin: config.bridge_name)
+  io.println(
+    "reeds: "
+    <> db_path
+    <> " (sqlite "
+    <> store.version(conn)
+    <> ", origin "
+    <> config.bridge_name
+    <> ")",
+  )
 
   let hub_name = process.new_name("reeds_hub")
   let hub_subject = process.named_subject(hub_name)
@@ -46,7 +54,7 @@ pub fn main() {
 
   let assert Ok(_) =
     supervisor.new(supervisor.OneForOne)
-    |> supervisor.add(hub.supervised(conn, hub_name))
+    |> supervisor.add(hub.supervised(conn, config.bridge_name, hub_name))
     |> list.fold(sources, _, fn(sup, src) {
       supervisor.add(sup, source.supervised(src, hub_subject))
     })
