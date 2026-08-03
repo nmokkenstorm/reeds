@@ -1,4 +1,5 @@
 import gleam/erlang/process
+import gleam/httpc
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
@@ -10,6 +11,7 @@ import reeds/hub
 import reeds/sources/bitbucket
 import reeds/sources/github
 import reeds/sources/gitlab
+import reeds/sources/poller
 import reeds/store
 import reeds/whisper.{Whisper}
 
@@ -176,6 +178,34 @@ pub fn config_bind_test() {
     assert parsed.bind == expected
   })
   let assert Error(_) = config.parse("bind = 7333\n")
+}
+
+/// The reason a poll failed has to survive into the whisper: "request failed"
+/// for every cause is what made a two-day outage indistinguishable from a
+/// dropped keep-alive.
+pub fn poller_describe_error_test() {
+  [
+    #(httpc.ResponseTimeout, "response timed out"),
+    #(httpc.InvalidUtf8Response, "response was not utf8"),
+    #(
+      httpc.FailedToConnect(
+        httpc.Posix("econnrefused"),
+        httpc.Posix("enetunreach"),
+      ),
+      "could not connect (ipv4: econnrefused, ipv6: enetunreach)",
+    ),
+    #(
+      httpc.FailedToConnect(
+        httpc.TlsAlert("bad_certificate", "expired"),
+        httpc.Posix("ehostunreach"),
+      ),
+      "could not connect (ipv4: tls bad_certificate expired, ipv6: ehostunreach)",
+    ),
+  ]
+  |> list.each(fn(row) {
+    let #(error, expected) = row
+    assert poller.describe_error(error) == expected
+  })
 }
 
 pub fn config_rejects_kindless_source_test() {

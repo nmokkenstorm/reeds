@@ -183,6 +183,32 @@ fn gone_draft(prefix: String, seen_key: String) -> Draft {
   )
 }
 
+/// httpc already tells us why a request failed (refused, timed out, TLS
+/// rejected); collapsing that to "request failed" throws the diagnosis away
+/// and leaves an operator staring at a URL. Exported for tests.
+pub fn describe_error(error: httpc.HttpError) -> String {
+  case error {
+    httpc.InvalidUtf8Response -> "response was not utf8"
+    httpc.ResponseTimeout -> "response timed out"
+    // Both families are reported: a host resolving to a working v4 and a
+    // black-holed v6 fails here, and seeing only one address family is what
+    // makes that look like an unexplained flake.
+    httpc.FailedToConnect(ip4, ip6) ->
+      "could not connect (ipv4: "
+      <> describe_connect(ip4)
+      <> ", ipv6: "
+      <> describe_connect(ip6)
+      <> ")"
+  }
+}
+
+fn describe_connect(error: httpc.ConnectError) -> String {
+  case error {
+    httpc.Posix(code) -> code
+    httpc.TlsAlert(code, detail) -> "tls " <> code <> " " <> detail
+  }
+}
+
 fn fetch(
   headers: List(#(String, String)),
   url: String,
@@ -196,7 +222,8 @@ fn fetch(
       request.set_header(req, header.0, header.1)
     })
   use resp <- result.try(case rescue(fn() { httpc.send(req) }) {
-    Ok(sent) -> sent |> result.replace_error("request failed: " <> url)
+    Ok(sent) ->
+      sent |> result.map_error(fn(e) { describe_error(e) <> " for " <> url })
     Error(crash) -> Error("transport error " <> crash <> " for " <> url)
   })
   case resp.status {
