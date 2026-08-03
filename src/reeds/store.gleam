@@ -47,6 +47,10 @@ create table if not exists source_health(
   last_error_ts        integer,
   primary key (source, feed)
 ) strict;
+create table if not exists cursors(
+  peer   text primary key,
+  cursor integer not null
+) strict;
 "
 
 pub fn open(path: String, origin origin: String) -> Result(Connection, Error) {
@@ -330,6 +334,38 @@ pub fn put_source_state(
      on conflict(name) do update set state = excluded.state",
     on: conn,
     with: [sqlight.text(name), sqlight.text(state)],
+    expecting: decode.success(Nil),
+  )
+  |> result.replace(Nil)
+}
+
+/// A peer never polled has cursor 0, same as `since=0` on the read API: the
+/// pull loop's first tick asks for everything the peer has.
+pub fn get_peer_cursor(conn: Connection, peer: String) -> Result(Int, Error) {
+  sqlight.query(
+    "select cursor from cursors where peer = ?1",
+    on: conn,
+    with: [sqlight.text(peer)],
+    expecting: decode.field(0, decode.int, decode.success),
+  )
+  |> result.map(fn(rows) {
+    case rows {
+      [cursor, ..] -> cursor
+      [] -> 0
+    }
+  })
+}
+
+pub fn put_peer_cursor(
+  conn: Connection,
+  peer: String,
+  cursor: Int,
+) -> Result(Nil, Error) {
+  sqlight.query(
+    "insert into cursors(peer, cursor) values (?1, ?2)
+     on conflict(peer) do update set cursor = excluded.cursor",
+    on: conn,
+    with: [sqlight.text(peer), sqlight.int(cursor)],
     expecting: decode.success(Nil),
   )
   |> result.replace(Nil)

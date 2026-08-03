@@ -47,9 +47,9 @@ Headers on publish: `x-reeds-sender`, `x-reeds-kind` (both optional).
 ### Auth
 
 Loopback requests need nothing. Any other request must carry
-`Authorization: Bearer <token>` matching a `[[peers]]` token from config, or
-the daemon answers 401 before routing. Tokens are self-asserted per bridge,
-not per sender: see `config.example.toml`.
+`Authorization: Bearer <token>` matching a `[peers.<name>]` token from
+config, or the daemon answers 401 before routing. Tokens are self-asserted
+per bridge, not per sender: see `config.example.toml`.
 
 Topics are dotted lowercase segments (`bb.pr.api.12`). A prefix matches
 whole segments: `bb.pr` matches `bb.pr.x` but not `bb.private`. `*` matches

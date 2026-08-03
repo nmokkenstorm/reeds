@@ -7,7 +7,7 @@ db = "/absolute/path/reeds.db"
 # Loopback by default. Widen this on purpose (containers set
 # REEDS_BIND=0.0.0.0 and restrict on the host side instead); loopback stays
 # unauthenticated either way, so anything reaching the port from off-box
-# needs a token from [[peers]] below.
+# needs a token from [peers.<name>] below.
 # bind = "localhost"
 
 # This bridge's identity in the mesh: stamped as `origin` on every whisper it
@@ -15,12 +15,6 @@ db = "/absolute/path/reeds.db"
 # host's hostname; set it explicitly if that is not stable or not unique.
 # [bridge]
 # name = "laptop"
-
-# Each [[peers]] entry authenticates non-loopback requests bearing its token
-# (Authorization: Bearer <token>). Names are self-asserted, not verified.
-# [[peers]]
-# name = "laptop"
-# token_env = "REEDS_PEER_LAPTOP_TOKEN"    # or token = "..." inline
 
 # Each [sources.<name>] section is an independent poller with its own diff
 # state, sender name, and credentials. Config is fail-fast: a malformed file or
@@ -44,3 +38,14 @@ owner = "someone"
 repos = ["some-repo"]
 enabled = false
 token_env = "GITHUB_TOKEN"
+
+# Each [peers.<name>] section is another bridge this one syncs with. `pull`
+# tails the peer's `/t/*?since=` read API and ingests, resuming from a cursor
+# persisted per peer; `push` and `both` are configured the same way. Every
+# peer's token also authenticates its non-loopback requests here
+# (Authorization: Bearer <token>), regardless of mode.
+# [peers.homelab]
+# url = "http://homelab.local:7333"
+# token_env = "REEDS_PEER_HOMELAB_TOKEN"   # or token = "..." inline
+# mode = "pull"                            # pull (default) | push | both
+# interval_seconds = 30                    # optional, default 30, minimum 5

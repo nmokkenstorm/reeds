@@ -29,21 +29,39 @@ pub type SourceSpec {
   )
 }
 
-/// A peer bridge whose token authenticates non-loopback requests. `url` and
-/// `mode` (the sync loop's own concerns) are deliberately absent: nothing
-/// reads them yet.
+/// `pull` tails the peer's read API and ingests; `push` batches this
+/// bridge's whispers to the peer's `/ingest`; `both` runs both halves. Every
+/// mode's token also authenticates that peer's non-loopback requests here.
+pub type PeerMode {
+  Pull
+  Push
+  Both
+}
+
 pub type PeerSpec {
-  PeerSpec(name: String, token: String)
+  PeerSpec(
+    name: String,
+    url: String,
+    token: String,
+    mode: PeerMode,
+    interval_ms: Int,
+    backoff_cap_ms: Int,
+  )
 }
 
 /// A table plus the context every error it produces is labelled with, so a
-/// source module cannot mislabel its own failures or forget the prefix.
+/// source or peer module cannot mislabel its own failures or forget the
+/// prefix.
 pub opaque type Reader {
   Reader(table: Dict(String, Toml), context: String)
 }
 
 pub fn source_reader(name: String, table: Dict(String, Toml)) -> Reader {
   Reader(table:, context: "source " <> name)
+}
+
+pub fn peer_reader(name: String, table: Dict(String, Toml)) -> Reader {
+  Reader(table:, context: "peer " <> name)
 }
 
 /// Load config from a TOML file. Only a genuinely absent file yields the
@@ -101,7 +119,7 @@ fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
       |> dict.to_list
       |> list.try_map(fn(entry) {
         let #(name, value) = entry
-        use _ <- result.try(instance_name("source", name))
+        use _ <- result.try(instance_name(name))
         case value {
           tom.Table(table) | tom.InlineTable(table) -> {
             let reader = source_reader(name, table)
@@ -115,33 +133,57 @@ fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
   }
 }
 
-/// `[[peers]]` entries, each authenticating non-loopback requests bearing
-/// its token. Absent unless the operator opts a bridge into the mesh.
+/// Peers this bridge syncs with. A cursor is a per-peer thing regardless of
+/// mode, so every mode is parsed the same way; only the pull loop cares
+/// whether `mode` includes pulling. Every mode's token also authenticates
+/// that peer's non-loopback requests.
 fn peers(toml: Dict(String, Toml)) -> Result(List(PeerSpec), String) {
-  case tom.get(toml, ["peers"]) {
+  case tom.get_table(toml, ["peers"]) {
     Error(_) -> Ok([])
-    Ok(tom.ArrayOfTables(tables)) -> list.try_map(tables, peer_spec)
-    Ok(_) -> Error("peers: must be an array of tables ([[peers]])")
+    Ok(tables) ->
+      tables
+      |> dict.to_list
+      |> list.try_map(fn(entry) {
+        let #(name, value) = entry
+        use _ <- result.try(instance_name(name))
+        case value {
+          tom.Table(table) | tom.InlineTable(table) -> {
+            let reader = peer_reader(name, table)
+            use url <- result.try(required_string(reader, "url"))
+            use token <- result.try(token(reader))
+            use mode <- result.try(peer_mode(reader))
+            use interval_ms <- result.try(interval_ms(reader))
+            use backoff_cap_ms <- result.try(backoff_cap_ms(reader, interval_ms))
+            Ok(PeerSpec(
+              name:,
+              url:,
+              token:,
+              mode:,
+              interval_ms:,
+              backoff_cap_ms:,
+            ))
+          }
+          _ -> Error("peer " <> name <> ": not a table")
+        }
+      })
   }
 }
 
-fn peer_spec(table: Dict(String, Toml)) -> Result(PeerSpec, String) {
-  use name <- result.try(required_string(
-    Reader(table:, context: "peers"),
-    "name",
-  ))
-  use _ <- result.try(instance_name("peer", name))
-  use token <- result.try(token(Reader(table:, context: "peer " <> name)))
-  Ok(PeerSpec(name:, token:))
+fn peer_mode(reader: Reader) -> Result(PeerMode, String) {
+  use raw <- result.try(optional_string(reader, "mode", "pull"))
+  case raw {
+    "pull" -> Ok(Pull)
+    "push" -> Ok(Push)
+    "both" -> Ok(Both)
+    _ -> Error(problem(reader, "mode", "must be 'pull', 'push', or 'both'"))
+  }
 }
 
-fn instance_name(kind: String, name: String) -> Result(Nil, String) {
+fn instance_name(name: String) -> Result(Nil, String) {
   case whisper.valid_topic(name) {
     True -> Ok(Nil)
     False ->
-      Error(
-        kind <> " " <> name <> ": name must be lowercase [a-z0-9_-] segments",
-      )
+      Error("source " <> name <> ": name must be lowercase [a-z0-9_-] segments")
   }
 }
 
