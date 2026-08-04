@@ -51,8 +51,9 @@ pub fn main() {
   let pulling_peers = list.filter(config.peers, fn(p) { p.mode != Push })
   list.each(pulling_peers, announce_peer)
 
+  let peer_tokens = list.map(config.peers, fn(peer) { peer.token })
   let web =
-    mist.new(api.handler(hub_subject))
+    mist.new(api.handler(hub_subject, peer_tokens))
     |> mist.bind(bind)
     |> mist.port(port)
 

@@ -30,7 +30,8 @@ pub type SourceSpec {
 }
 
 /// `pull` tails the peer's read API and ingests; `push` batches this
-/// bridge's whispers to the peer's `/ingest`; `both` runs both halves.
+/// bridge's whispers to the peer's `/ingest`; `both` runs both halves. Every
+/// mode's token also authenticates that peer's non-loopback requests here.
 pub type PeerMode {
   Pull
   Push
@@ -134,7 +135,8 @@ fn sources(toml: Dict(String, Toml)) -> Result(List(SourceSpec), String) {
 
 /// Peers this bridge syncs with. A cursor is a per-peer thing regardless of
 /// mode, so every mode is parsed the same way; only the pull loop cares
-/// whether `mode` includes pulling.
+/// whether `mode` includes pulling. Every mode's token also authenticates
+/// that peer's non-loopback requests.
 fn peers(toml: Dict(String, Toml)) -> Result(List(PeerSpec), String) {
   case tom.get_table(toml, ["peers"]) {
     Error(_) -> Ok([])

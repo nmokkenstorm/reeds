@@ -1,4 +1,6 @@
 import gleam/erlang/process
+import gleam/http
+import gleam/http/request
 import gleam/httpc
 import gleam/int
 import gleam/json
@@ -1024,7 +1026,7 @@ fn start_bridge(origin: String) -> #(process.Subject(hub.Msg), Int) {
 
   let port_subject = process.new_subject()
   let builder =
-    mist.new(api.handler(hub_subject))
+    mist.new(api.handler(hub_subject, []))
     |> mist.bind("127.0.0.1")
     |> mist.port(0)
     |> mist.after_start(fn(port, _scheme, _ip) {
@@ -1115,6 +1117,69 @@ pub fn peer_pull_converges_and_never_round_trips_test() {
   assert list.length(hub1_rows) == 2
 }
 
+/// POST /ingest accepts a since-response-shaped batch, dedups on each
+/// whisper's own (origin, origin_seq), assigns local seqs, and reports the
+/// per-origin high-water mark so a pusher can advance without a read
+/// round-trip.
+pub fn ingest_route_test() {
+  let #(hub, port) = start_bridge("hub1")
+  let whispers = [
+    Whisper(
+      seq: 9,
+      topic: "gh.pr.tools.7",
+      ts: 100,
+      sender: "gh",
+      kind: "pr.seen",
+      body: "{\"a\":1}",
+      origin: "hub2",
+      origin_seq: 5,
+      idem: Some("7:2026-07-28T09:00:00Z"),
+    ),
+    Whisper(
+      seq: 10,
+      topic: "agents.turtle",
+      ts: 200,
+      sender: "turtle",
+      kind: "note",
+      body: "{\"msg\":\"carry on\"}",
+      origin: "hub2",
+      origin_seq: 6,
+      idem: None,
+    ),
+  ]
+  let assert Ok(req) =
+    request.to("http://127.0.0.1:" <> int.to_string(port) <> "/ingest")
+  let req =
+    req
+    |> request.set_method(http.Post)
+    |> request.set_body(since_envelope(whispers, 6, False))
+
+  let assert Ok(resp) = httpc.send(req)
+  assert resp.status == 200
+  assert resp.body == "{\"accepted\":2,\"cursors\":{\"hub2\":6}}"
+
+  let assert Ok(stored) =
+    process.call(hub, waiting: 1000, sending: hub.ReadSince("*", 0, 10, _))
+  assert list.length(stored) == 2
+
+  // Resending the same batch is a dedup no-op: accepted drops to 0, but the
+  // cursor still reports 6 since that origin_seq really was received.
+  let assert Ok(resp2) = httpc.send(req)
+  assert resp2.body == "{\"accepted\":0,\"cursors\":{\"hub2\":6}}"
+}
+
+pub fn ingest_route_rejects_malformed_body_test() {
+  let #(_hub, port) = start_bridge("hub1")
+  let assert Ok(req) =
+    request.to("http://127.0.0.1:" <> int.to_string(port) <> "/ingest")
+  let req =
+    req
+    |> request.set_method(http.Post)
+    |> request.set_body("not json")
+  let assert Ok(resp) = httpc.send(req)
+  assert resp.status == 400
+}
+
 @external(erlang, "reeds_rescue_ffi", "rescue")
 fn rescue(thunk: fn() -> a) -> Result(a, String)
 
@@ -1123,6 +1188,44 @@ fn raise(reason: String) -> a
 
 pub fn rescue_passes_a_value_through_test() {
   assert rescue(fn() { 42 }) == Ok(42)
+}
+
+pub fn is_loopback_ip_test() {
+  [
+    #(mist.IpV4(127, 0, 0, 1), True),
+    #(mist.IpV4(127, 1, 2, 3), True),
+    #(mist.IpV4(10, 0, 0, 5), False),
+    #(mist.IpV4(192, 168, 1, 1), False),
+    #(mist.IpV6(0, 0, 0, 0, 0, 0, 0, 1), True),
+    #(mist.IpV6(0xfe80, 0, 0, 0, 0, 0, 0, 1), False),
+  ]
+  |> list.each(fn(row) {
+    let #(ip, expected) = row
+    assert api.is_loopback_ip(ip) == expected
+  })
+}
+
+/// The token has to come from a scheme-prefixed `Authorization` header, not
+/// from bare presence of the right string somewhere in it.
+pub fn valid_bearer_test() {
+  let tokens = ["peer-a-token", "peer-b-token"]
+  [
+    #(Ok("Bearer peer-a-token"), True),
+    #(Ok("Bearer peer-b-token"), True),
+    #(Ok("Bearer wrong-token"), False),
+    #(Ok("bearer peer-a-token"), False),
+    #(Ok("peer-a-token"), False),
+    #(Ok(""), False),
+    #(Error(Nil), False),
+  ]
+  |> list.each(fn(row) {
+    let #(header, expected) = row
+    assert api.valid_bearer(header, tokens) == expected
+  })
+}
+
+pub fn valid_bearer_rejects_all_when_no_peers_configured_test() {
+  assert api.valid_bearer(Ok("Bearer anything"), []) == False
 }
 
 pub fn rescue_turns_a_raise_into_an_error_test() {
