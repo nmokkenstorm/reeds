@@ -1,5 +1,6 @@
 import envoy
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -73,7 +74,7 @@ pub fn peer_reader(name: String, table: Dict(String, Toml)) -> Reader {
 pub fn load(path: String) -> Result(Config, String) {
   case simplifile.read(path) {
     Ok(raw) -> {
-      use toml <- result.try(parse_toml(raw, "config"))
+      use toml <- result.try(parse_toml(raw, path))
       use merged <- result.try(resolve_imports(toml, dirname(path)))
       validate(merged)
     }
@@ -108,21 +109,86 @@ fn resolve_imports(
   base_dir: String,
 ) -> Result(Dict(String, Toml), String) {
   use paths <- result.try(import_paths(toml))
-  list.try_fold(over: paths, from: dict.delete(toml, "import"), with: fn(
-    acc,
-    path,
-  ) {
+  let root = dict.delete(toml, "import")
+  let seen = index_leaves(root, at: [], label: "the root config", into: dict.new())
+  list.try_fold(over: paths, from: #(root, seen), with: fn(state, path) {
+    let #(acc, seen) = state
     let label = "config: import " <> path
+    use resolved <- result.try(
+      resolve_path(base_dir, path)
+      |> result.map_error(fn(reason) { label <> ": " <> reason }),
+    )
     use raw <- result.try(
-      simplifile.read(resolve_path(base_dir, path))
+      simplifile.read(resolved)
       |> result.map_error(fn(error) {
         label <> ": " <> simplifile.describe_error(error)
       }),
     )
     use imported <- result.try(parse_toml(raw, label))
-    case dict.has_key(imported, "import") {
+    use _ <- result.try(case dict.has_key(imported, "import") {
       True -> Error(label <> ": imports do not nest")
-      False -> merge(acc, imported, at: [], file: path)
+      False -> Ok(Nil)
+    })
+    use _ <- result.try(secret_mode(resolved, imported, label))
+    use merged <- result.try(merge(acc, imported, at: [], file: path, seen:))
+    Ok(#(merged, index_leaves(imported, at: [], label: path, into: seen)))
+  })
+  |> result.map(fn(state) { state.0 })
+}
+
+/// Leaf key path -> the file that defined it, so a collision can name both
+/// sides instead of only the file that lost.
+fn index_leaves(
+  table: Dict(String, Toml),
+  at at: List(String),
+  label label: String,
+  into into: Dict(String, String),
+) -> Dict(String, String) {
+  dict.fold(table, into, fn(acc, key, value) {
+    case value {
+      tom.Table(inner) | tom.InlineTable(inner) ->
+        index_leaves(inner, at: [key, ..at], label:, into: acc)
+      _ -> dict.insert(acc, key_path([key, ..at]), label)
+    }
+  })
+}
+
+/// A file that defines a `token` anywhere must not be group- or
+/// other-accessible, the same stance ssh takes on key files: the 0600 split
+/// is the point of importing, so a world-readable tokens file is a
+/// misconfiguration, not a preference.
+fn secret_mode(
+  resolved: String,
+  imported: Dict(String, Toml),
+  label: String,
+) -> Result(Nil, String) {
+  case contains_token(imported) {
+    False -> Ok(Nil)
+    True -> {
+      use info <- result.try(
+        simplifile.file_info(resolved)
+        |> result.map_error(fn(error) {
+          label <> ": " <> simplifile.describe_error(error)
+        }),
+      )
+      case int.bitwise_and(info.mode, 0o77) {
+        0 -> Ok(Nil)
+        _ ->
+          Error(
+            label
+            <> ": defines tokens but is group/other accessible; chmod 600 it",
+          )
+      }
+    }
+  }
+}
+
+fn contains_token(table: Dict(String, Toml)) -> Bool {
+  dict.fold(table, False, fn(found, key, value) {
+    found
+    || case value {
+      tom.Table(inner) | tom.InlineTable(inner) -> contains_token(inner)
+      _ -> key == "token"
     }
   })
 }
@@ -148,6 +214,7 @@ fn merge(
   overlay: Dict(String, Toml),
   at at: List(String),
   file file: String,
+  seen seen: Dict(String, String),
 ) -> Result(Dict(String, Toml), String) {
   dict.fold(overlay, Ok(base), fn(acc, key, value) {
     use acc <- result.try(acc)
@@ -158,27 +225,39 @@ fn merge(
       | Ok(tom.InlineTable(existing)), tom.Table(incoming)
       | Ok(tom.InlineTable(existing)), tom.InlineTable(incoming)
       ->
-        merge(existing, incoming, at: [key, ..at], file:)
+        merge(existing, incoming, at: [key, ..at], file:, seen:)
         |> result.map(fn(merged) { dict.insert(acc, key, tom.Table(merged)) })
-      Ok(_), _ ->
+      Ok(_), _ -> {
+        let path = key_path([key, ..at])
+        let source = case dict.get(seen, path) {
+          Ok(label) -> " in " <> label
+          Error(Nil) -> ""
+        }
         Error(
           "config: import "
           <> file
           <> ": '"
-          <> { [key, ..at] |> list.reverse |> string.join(".") }
-          <> "' is already defined",
+          <> path
+          <> "' is already defined"
+          <> source,
         )
+      }
     }
   })
 }
 
+fn key_path(reversed: List(String)) -> String {
+  reversed |> list.reverse |> string.join(".")
+}
+
 /// Absolute and `~/` paths stand alone; anything else is relative to the
 /// importing file's directory, so the config directory can move as a unit.
-fn resolve_path(base_dir: String, path: String) -> String {
+fn resolve_path(base_dir: String, path: String) -> Result(String, String) {
   case path, envoy.get("HOME") {
-    "/" <> _, _ -> path
-    "~/" <> rest, Ok(home) -> home <> "/" <> rest
-    _, _ -> base_dir <> "/" <> path
+    "/" <> _, _ -> Ok(path)
+    "~/" <> rest, Ok(home) -> Ok(home <> "/" <> rest)
+    "~/" <> _, Error(_) -> Error("cannot expand '~': HOME is not set")
+    _, _ -> Ok(base_dir <> "/" <> path)
   }
 }
 
@@ -389,22 +468,22 @@ pub fn string_list(
 }
 
 /// Token from `token`, or the environment variable named by `token_env`.
+/// Both at once is an error, not a precedence rule: with imports merging
+/// files, "which credential wins" must never be answered silently.
 pub fn token(reader: Reader) -> Result(String, String) {
   use direct <- result.try(lookup(reader, tom.get_string, "token"))
-  case direct {
-    Some("") -> Error(problem(reader, "token", "is empty"))
-    Some(value) -> Ok(value)
-    None -> {
-      use named <- result.try(lookup(reader, tom.get_string, "token_env"))
-      use var <- result.try(option.to_result(
-        named,
-        reader.context <> ": missing 'token' or 'token_env'",
-      ))
+  use named <- result.try(lookup(reader, tom.get_string, "token_env"))
+  case direct, named {
+    Some(_), Some(_) ->
+      Error(problem(reader, "token", "and 'token_env' are both set; pick one"))
+    Some(""), None -> Error(problem(reader, "token", "is empty"))
+    Some(value), None -> Ok(value)
+    None, Some(var) ->
       case envoy.get(var) {
         Ok(value) if value != "" -> Ok(value)
         _ -> Error(reader.context <> ": env " <> var <> " not set")
       }
-    }
+    None, None -> Error(reader.context <> ": missing 'token' or 'token_env'")
   }
 }
 

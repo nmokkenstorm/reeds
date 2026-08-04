@@ -2,10 +2,10 @@
 # REEDS_DB, REEDS_PORT and REEDS_BIND override the values here.
 
 # Imported files deep-merge into this one, so secrets can live in a separate
-# 0600 file: put `[sources.work] token = "..."` fragments there and keep this
-# file freely editable. A key defined in both files refuses the boot (no
-# shadowing), and imports do not nest. Relative paths resolve against this
-# file's directory.
+# file: put `[sources.work] token = "..."` fragments there and keep this file
+# freely editable. A key defined in both files refuses the boot (no
+# shadowing), imports do not nest, and a token-bearing import must be 0600 or
+# the boot refuses. Relative paths resolve against this file's directory.
 # import = ["tokens.toml"]
 
 port = 7333
