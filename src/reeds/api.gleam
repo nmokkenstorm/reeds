@@ -24,6 +24,11 @@ import reeds/wire
 
 const max_body = 1_048_576
 
+/// Double the publish limit: a pushed whisper wraps a publish-limit body in
+/// its envelope, so `/ingest` must accept more than `POST /t/:topic` or a
+/// maximum legal whisper could never replicate.
+const max_ingest_body = 2_097_152
+
 const max_page = 1000
 
 /// Loopback requests are unauthenticated; anything else must carry a
@@ -189,7 +194,7 @@ fn ingest(
   req: Request(Connection),
 ) -> Response(ResponseData) {
   let parsed =
-    mist.read_body(req, max_body_limit: max_body)
+    mist.read_body(req, max_body_limit: max_ingest_body)
     |> result.replace_error("unreadable body")
     |> result.try(fn(read) {
       bit_array.to_string(read.body)

@@ -1,6 +1,6 @@
 # Mesh and state view
 
-Status: implemented as of 2026-08-04, except where marked below. Covers the
+Status: implemented as of 2026-08-04. Covers the
 per-host bridge topology, peer sync, auth, the materialized state view, and
 the whisper kind conventions that make agent tasks foldable.
 
@@ -70,19 +70,25 @@ any whisper that round-trips back to a bridge that already has it.
 Config per peer: `name`, `url`, `token`, `mode = pull | push | both`, plus
 the same `interval_seconds`/`backoff_cap_seconds` knobs sources take.
 
-- **pull** (implemented): tail the peer's `/t/*?since=<cursor>` and ingest.
-  The cursor is the peer's local seq, persisted per peer, so kill-and-resume
-  loses nothing. Outbound-only, resumable, idempotent.
-- **push** (not yet implemented): the receiving half, `/ingest`, exists; the
-  sending loop that batches unconfirmed home whispers to a peer does not.
-  A `push`-only peer currently gets no loop at all and `both` behaves as
-  `pull`, so the NAT'd-laptop scenario does not converge outward yet.
+- **pull**: tail the peer's `/t/*?since=<cursor>` and ingest. The cursor is
+  the peer's local seq, persisted per peer, so kill-and-resume loses
+  nothing. Outbound-only, resumable, idempotent.
+- **push**: batch everything past a persisted outbound cursor to the peer's
+  `/ingest`, in the read API's response shape, and advance only on success.
+  Batches are capped by bytes, not count, and `/ingest` accepts double the
+  publish limit, so even a maximum-size whisper replicates instead of
+  wedging the loop. An empty batch still posts, so reachability stays an
+  honest health signal; echoes the peer already holds are no-ops under its
+  dedup.
 
-Once push lands: a NAT'd laptop runs `both` against a reachable peer;
-reachable peers run `pull` against each other. The always-on bridge becomes
-a rendezvous point by uptime, not by architecture. Peer backoff and health
-reuse the source machinery: peers report as `peer-<name>` in `/health` and
-whisper transitions on `reeds.source.peer-<name>`.
+A NAT'd laptop runs `both` against a reachable peer; reachable peers run
+`pull` against each other. The always-on bridge becomes a rendezvous point
+by uptime, not by architecture. One actor per peer runs both directions in
+one tick and reports them as feeds of one health source, so `degraded`
+means "one direction failing"; peers report as `peer-<name>` in `/health`
+and whisper transitions on `reeds.source.peer-<name>`. Each direction
+backs off on its own streak, so a wedged push slows neither pull nor the
+tick.
 
 ## Auth
 
@@ -143,14 +149,8 @@ Two kinds, so the fold can distinguish lanes without parsing bodies:
 Agents that only ever emit `status` still fold correctly; they just never
 leave the board except by staleness, which the ages make visible.
 
-## Remaining work
+## Deferred
 
-- **Push loop**: the sending half of push mode, so `both` converges outward
-  through a one-way network boundary. `/ingest` and its cursor bookkeeping
-  already wait for it.
-- **Kind rollout**: `done`/`needs-user` adopted by the agent-side whisper
-  conventions (global CLAUDE.md guidance).
-
-Deferred, unchanged from the original spec: mesh sizes beyond a handful of
-peers, per-sender auth, signatures, retention/compaction policy for the
+Unchanged from the original spec: mesh sizes beyond a handful of peers,
+per-sender auth, signatures, retention/compaction policy for the
 append-only log.

@@ -1,10 +1,33 @@
 import gleam/dynamic/decode
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/string
 import reeds/whisper.{type Whisper, Whisper}
+
+/// The write side of the replication format: builds a `/t/*?since=N`
+/// response body, so a pusher's `POST /ingest` payload is byte-compatible
+/// with what `parse_since_response` reads. Bodies pass through as raw JSON
+/// text for the reason given there.
+pub fn since_response(
+  whispers: List(Whisper),
+  next_since next_since: Int,
+  more more: Bool,
+) -> String {
+  let more_text = case more {
+    True -> "true"
+    False -> "false"
+  }
+  "{\"whispers\":"
+  <> whisper.list_to_json_string(whispers)
+  <> ",\"next_since\":"
+  <> int.to_string(next_since)
+  <> ",\"more\":"
+  <> more_text
+  <> "}"
+}
 
 /// Parses a `/t/*?since=N` response (the pull loop's read of a peer, and the
 /// replication format the whole mesh is built on) into its whispers and the
