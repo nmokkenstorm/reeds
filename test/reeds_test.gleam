@@ -591,6 +591,167 @@ pub fn config_parse_test() {
   ] = parsed.sources
 }
 
+fn write_config_dir(name: String, files: List(#(String, String))) -> String {
+  let base = "/tmp/reeds_test_" <> name
+  let _ = simplifile.delete(base)
+  let assert Ok(Nil) = simplifile.create_directory_all(base)
+  list.each(files, fn(file) {
+    let #(file_name, content) = file
+    let path = base <> "/" <> file_name
+    let assert Ok(Nil) = simplifile.write(path, content)
+    let assert Ok(Nil) = simplifile.set_permissions_octal(path, 0o600)
+  })
+  base
+}
+
+pub fn config_import_merges_secrets_test() {
+  let base =
+    write_config_dir("import_merge", [
+      #(
+        "config.toml",
+        "import = [\"tokens.toml\"]\nport = 7444\n\n[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = [\"r\"]\n\n[peers.hub2]\nurl = \"http://hub2:7333\"\n",
+      ),
+      #(
+        "tokens.toml",
+        "[sources.work]\ntoken = \"sekrit\"\n\n[peers.hub2]\ntoken = \"peer-sekrit\"\n",
+      ),
+    ])
+  let assert Ok(parsed) = config.load(base <> "/config.toml")
+  assert parsed.port == 7444
+  let assert [spec] = parsed.sources
+  let assert Ok("sekrit") =
+    config.token(config.source_reader(spec.name, spec.table))
+  let assert [peer] = parsed.peers
+  assert peer.token == "peer-sekrit"
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+/// A key defined in both files is refused, not shadowed: which file wins is
+/// exactly the ambiguity the fail-fast policy exists to rule out.
+pub fn config_import_rejects_duplicate_key_test() {
+  let base =
+    write_config_dir("import_conflict", [
+      #(
+        "config.toml",
+        "import = [\"tokens.toml\"]\n\n[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = [\"r\"]\ntoken = \"inline\"\n",
+      ),
+      #("tokens.toml", "[sources.work]\ntoken = \"imported\"\n"),
+    ])
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "sources.work.token")
+  assert string.contains(reason, "already defined")
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+pub fn config_import_missing_file_test() {
+  let base =
+    write_config_dir("import_missing", [
+      #("config.toml", "import = [\"tokens.toml\"]\n"),
+    ])
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "tokens.toml")
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+pub fn config_import_does_not_nest_test() {
+  let base =
+    write_config_dir("import_nested", [
+      #("config.toml", "import = [\"tokens.toml\"]\n"),
+      #("tokens.toml", "import = [\"more.toml\"]\n"),
+    ])
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "imports do not nest")
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+pub fn config_parse_ignores_import_test() {
+  let assert Ok(parsed) = config.parse("import = [\"tokens.toml\"]\nport = 7444\n")
+  assert parsed.port == 7444
+}
+
+pub fn config_import_must_be_string_array_test() {
+  let assert Error(_) = config.parse("import = \"tokens.toml\"\n")
+  let assert Error(_) = config.parse("import = [7]\n")
+}
+
+/// A collision between two imports names the file that defined the key
+/// first, not just the one that lost the race.
+pub fn config_import_collision_names_first_definer_test() {
+  let base =
+    write_config_dir("import_two_files", [
+      #("config.toml", "import = [\"a.toml\", \"b.toml\"]\n"),
+      #("a.toml", "[sources.work]\ntoken = \"one\"\n"),
+      #("b.toml", "[sources.work]\ntoken = \"two\"\n"),
+    ])
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "import b.toml")
+  assert string.contains(reason, "in a.toml")
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+pub fn config_import_top_level_collision_test() {
+  let base =
+    write_config_dir("import_port_twice", [
+      #("config.toml", "import = [\"extra.toml\"]\nport = 7444\n"),
+      #("extra.toml", "port = 7555\n"),
+    ])
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "'port'")
+  assert string.contains(reason, "the root config")
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+pub fn config_import_malformed_file_test() {
+  let base =
+    write_config_dir("import_malformed", [
+      #("config.toml", "import = [\"tokens.toml\"]\n"),
+      #("tokens.toml", "not toml ==="),
+    ])
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "tokens.toml")
+  assert string.contains(reason, "not valid toml")
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+/// A token-bearing import that is group/other accessible refuses the boot;
+/// tightening it to 0600 clears the refusal. Files without tokens are not
+/// subject to the check.
+pub fn config_import_enforces_secret_mode_test() {
+  let base =
+    write_config_dir("import_mode", [
+      #(
+        "config.toml",
+        "import = [\"tokens.toml\", \"plain.toml\"]\n\n[peers.hub2]\nurl = \"http://hub2:7333\"\n",
+      ),
+      #("tokens.toml", "[peers.hub2]\ntoken = \"sekrit\"\n"),
+      #("plain.toml", "port = 7444\n"),
+    ])
+  let assert Ok(Nil) =
+    simplifile.set_permissions_octal(base <> "/tokens.toml", 0o644)
+  let assert Ok(Nil) =
+    simplifile.set_permissions_octal(base <> "/plain.toml", 0o644)
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "tokens.toml")
+  assert string.contains(reason, "chmod 600")
+
+  let assert Ok(Nil) =
+    simplifile.set_permissions_octal(base <> "/tokens.toml", 0o600)
+  let assert Ok(parsed) = config.load(base <> "/config.toml")
+  assert parsed.port == 7444
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+/// `token` and `token_env` together is refused rather than resolved by
+/// precedence: with imports, the two lines may live in different files, and
+/// a stale file token silently beating a rotated env token is the failure
+/// this rules out.
+pub fn config_token_and_token_env_conflict_test() {
+  let raw =
+    "[peers.hub2]\nurl = \"http://hub2:7333\"\ntoken = \"inline\"\ntoken_env = \"SOME_VAR\"\n"
+  let assert Error(reason) = config.parse(raw)
+  assert string.contains(reason, "both set")
+}
+
 pub fn config_source_enabled_test() {
   let cases = [#("enabled = false\n", False), #("enabled = true\n", True)]
   list.each(cases, fn(item) {

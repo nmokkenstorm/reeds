@@ -45,6 +45,39 @@ repos = ["some-repo"]
 token_env = "GITHUB_TOKEN"
 ```
 
+## Splitting secrets out
+
+`import = ["tokens.toml"]` at the top of the config deep-merges the listed
+files into it before validation. The intended split: everything structural
+stays in `config.toml`, and a 0600 `tokens.toml` carries only credential
+fragments:
+
+```toml
+# tokens.toml
+[sources.work]
+token = "..."
+
+[peers.homelab]
+token = "..."
+```
+
+Merging is additive only. A leaf key defined in more than one file refuses
+the boot naming the key and both files (`'sources.work.token' is already
+defined in a.toml`), because which file wins is exactly the ambiguity
+fail-fast config exists to rule out. For the same reason `token` and
+`token_env` together refuse the boot even within one file: a stale file
+token silently beating a rotated env token is the failure this rules out.
+Imports do not nest, so the config graph is always one file plus its listed
+fragments. Relative import paths resolve against the importing file's
+directory and `~/` expands, so the config directory can move as a unit. A
+named import that is missing or malformed also refuses the boot: a daemon
+that quietly ran every source without credentials would be the worse
+failure.
+
+The 0600 is enforced, not suggested: an imported file that defines a
+`token` anywhere and is group- or other-accessible refuses the boot (the
+same stance ssh takes on key files). Imports without tokens are exempt.
+
 `REEDS_DB` and `REEDS_PORT` env vars override the file's values. Config is
 fail-fast: a malformed file, a wrong-typed value, or a section that fails
 validation refuses the whole boot. A daemon quietly running without a source
