@@ -74,17 +74,21 @@ the same `interval_seconds`/`backoff_cap_seconds` knobs sources take.
   the peer's local seq, persisted per peer, so kill-and-resume loses
   nothing. Outbound-only, resumable, idempotent.
 - **push**: batch everything past a persisted outbound cursor to the peer's
-  `/ingest`, in the read API's response shape, and advance on success. An
-  empty batch still posts, so reachability stays an honest health signal;
-  echoes the peer already holds are no-ops under its dedup.
+  `/ingest`, in the read API's response shape, and advance only on success.
+  Batches are capped by bytes, not count, and `/ingest` accepts double the
+  publish limit, so even a maximum-size whisper replicates instead of
+  wedging the loop. An empty batch still posts, so reachability stays an
+  honest health signal; echoes the peer already holds are no-ops under its
+  dedup.
 
 A NAT'd laptop runs `both` against a reachable peer; reachable peers run
 `pull` against each other. The always-on bridge becomes a rendezvous point
 by uptime, not by architecture. One actor per peer runs both directions in
 one tick and reports them as feeds of one health source, so `degraded`
 means "one direction failing"; peers report as `peer-<name>` in `/health`
-and whisper transitions on `reeds.source.peer-<name>`, backing off only
-when every direction is down.
+and whisper transitions on `reeds.source.peer-<name>`. Each direction
+backs off on its own streak, so a wedged push slows neither pull nor the
+tick.
 
 ## Auth
 

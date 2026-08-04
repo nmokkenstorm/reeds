@@ -5,9 +5,12 @@ import gleam/httpc
 import gleam/int
 import gleam/io
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/otp/supervision
 import gleam/result
+import gleam/string
+import reeds/clock
 import reeds/config.{type PeerSpec}
 import reeds/health
 import reeds/hub
@@ -25,8 +28,26 @@ pub opaque type Msg {
   Tick
 }
 
+/// Per-direction backoff bookkeeping, in actor memory: a supervisor restart
+/// resets it, which merely retries sooner. `last` is re-reported while the
+/// direction cools down so the shared health source keeps both feed rows
+/// alive (an omitted feed would be pruned).
+type Direction {
+  Direction(streak: Int, due_at_ms: Int, last: Option(health.FeedOutcome))
+}
+
+fn fresh() -> Direction {
+  Direction(streak: 0, due_at_ms: 0, last: None)
+}
+
 type State {
-  State(peer: PeerSpec, hub: Subject(hub.Msg), self: Subject(Msg))
+  State(
+    peer: PeerSpec,
+    hub: Subject(hub.Msg),
+    self: Subject(Msg),
+    pull: Direction,
+    push: Direction,
+  )
 }
 
 /// The `reeds.source.<name>` health/backoff machinery is keyed by name, so a
@@ -51,7 +72,7 @@ pub fn start(
 ) -> Result(actor.Started(Subject(Msg)), actor.StartError) {
   actor.new_with_initialiser(1000, fn(self) {
     process.send(self, Tick)
-    State(peer:, hub:, self:)
+    State(peer:, hub:, self:, pull: fresh(), push: fresh())
     |> actor.initialised
     |> actor.selecting(process.new_selector() |> process.select(self))
     |> actor.returning(self)
@@ -62,34 +83,60 @@ pub fn start(
 }
 
 /// One tick runs every direction the mode asks for and reports them as
-/// feeds of one health source, in one `RecordPoll`: recording per direction
-/// would prune the other direction's row, and one shared source is also
-/// what makes `degraded` mean "one direction failing", which is the
-/// diagnosis. Backoff only engages when every direction is down, same as
-/// sources.
+/// feeds of one health source in one `RecordPoll`: recording per direction
+/// would prune the other direction's row, and one shared source is what
+/// makes `degraded` mean "one direction failing", which is the diagnosis.
+/// Ticks stay on the base interval; each direction backs off on its own
+/// streak, since the min-streak rule sources use would never slow a wedged
+/// push while pull stays healthy.
 fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
   let Tick = msg
   let peer = state.peer
+  let now = clock.now_ms()
+  let pull_dir = case peer.mode {
+    config.Push -> state.pull
+    _ -> attempt(state.pull, now, peer, fn() { run_pull(state) })
+  }
+  let push_dir = case peer.mode {
+    config.Pull -> state.push
+    _ -> attempt(state.push, now, peer, fn() { run_push(state) })
+  }
   let outcomes =
-    list.append(
-      case peer.mode {
-        config.Push -> []
-        _ -> [run_pull(state)]
-      },
-      case peer.mode {
-        config.Pull -> []
-        _ -> [run_push(state)]
-      },
-    )
-  let down_streak = record_poll(state, outcomes)
-  process.send_after(
-    state.self,
-    health.backoff(peer.interval_ms, down_streak, peer.backoff_cap_ms),
-    Tick,
-  )
-  actor.continue(state)
+    list.append(option.values([pull_dir.last]), option.values([push_dir.last]))
+  let _ = record_poll(state, outcomes)
+  process.send_after(state.self, peer.interval_ms, Tick)
+  actor.continue(State(..state, pull: pull_dir, push: push_dir))
 }
 
+fn attempt(
+  dir: Direction,
+  now: Int,
+  peer: PeerSpec,
+  run: fn() -> health.FeedOutcome,
+) -> Direction {
+  case now < dir.due_at_ms {
+    True -> dir
+    False ->
+      case run() {
+        health.Reached(_) as outcome ->
+          Direction(streak: 0, due_at_ms: 0, last: Some(outcome))
+        outcome -> {
+          let streak = dir.streak + 1
+          Direction(
+            streak:,
+            due_at_ms: now
+              + health.backoff(peer.interval_ms, streak, peer.backoff_cap_ms),
+            last: Some(outcome),
+          )
+        }
+      }
+  }
+}
+
+/// The cursor only advances once the page is ingested: advancing past
+/// whispers the store refused (disk full mid-page) would lose them
+/// permanently, since nothing ever asks for that range again. Reasons are
+/// prefixed `local` when this bridge, not the peer, is what failed.
 fn run_pull(state: State) -> health.FeedOutcome {
   let peer = state.peer
   let cursor =
@@ -102,11 +149,17 @@ fn run_pull(state: State) -> health.FeedOutcome {
       io.println("reeds: peer " <> peer.name <> " pull failed: " <> reason)
       health.Unreachable("pull", reason)
     }
-    Ok(#(whispers, next_cursor)) -> {
-      ingest(state, whispers)
-      process.send(state.hub, hub.PutPeerCursor(peer.name, next_cursor))
-      health.Reached("pull")
-    }
+    Ok(#(whispers, next_cursor)) ->
+      case ingest(state, whispers) {
+        Error(reason) -> {
+          io.println("reeds: peer " <> peer.name <> " ingest failed: " <> reason)
+          health.Unreachable("pull", "local ingest failed: " <> reason)
+        }
+        Ok(_) -> {
+          process.send(state.hub, hub.PutPeerCursor(peer.name, next_cursor))
+          health.Reached("pull")
+        }
+      }
   }
 }
 
@@ -117,24 +170,56 @@ fn run_push(state: State) -> health.FeedOutcome {
       push_cursor_key(peer),
       _,
     ))
-  let batch =
+  case
     process.call(state.hub, waiting: 5000, sending: hub.ReadSince(
       "*",
       cursor,
       push_batch,
       _,
     ))
-  case batch |> result.try(push(peer, _, cursor)) {
-    Error(reason) -> {
-      io.println("reeds: peer " <> peer.name <> " push failed: " <> reason)
-      health.Unreachable("push", reason)
+  {
+    Error(reason) ->
+      health.Unreachable("push", "local read failed: " <> reason)
+    Ok(whispers) -> {
+      let batch = chunk(whispers, push_body_budget)
+      let more =
+        list.length(whispers) == push_batch
+        || list.length(batch) < list.length(whispers)
+      case push(peer, batch, cursor, more) {
+        Error(reason) -> {
+          io.println("reeds: peer " <> peer.name <> " push failed: " <> reason)
+          health.Unreachable("push", reason)
+        }
+        Ok(next_cursor) -> {
+          process.send(state.hub, hub.PutPeerCursor(
+            push_cursor_key(peer),
+            next_cursor,
+          ))
+          health.Reached("push")
+        }
+      }
     }
-    Ok(next_cursor) -> {
-      process.send(state.hub, hub.PutPeerCursor(
-        push_cursor_key(peer),
-        next_cursor,
-      ))
-      health.Reached("push")
+  }
+}
+
+/// The longest prefix whose serialized whispers fit the byte budget, but
+/// never fewer than one: `/ingest` accepts double the publish limit, so
+/// even a maximum-size lone whisper fits and no whisper can wedge the loop.
+pub fn chunk(whispers: List(Whisper), budget: Int) -> List(Whisper) {
+  case whispers {
+    [] -> []
+    [first, ..rest] -> {
+      let first_size = string.byte_size(whisper.to_json_string(first))
+      let #(_, taken) =
+        list.fold_until(rest, #(first_size, [first]), fn(acc, w) {
+          let #(size, taken) = acc
+          let next = size + 1 + string.byte_size(whisper.to_json_string(w))
+          case next > budget {
+            True -> list.Stop(acc)
+            False -> list.Continue(#(next, [w, ..taken]))
+          }
+        })
+      list.reverse(taken)
     }
   }
 }
@@ -147,22 +232,14 @@ fn push_cursor_key(peer: PeerSpec) -> String {
 
 /// Empty batches are the common case (nothing new since last cursor) and are
 /// skipped rather than round-tripping the hub for no reason.
-fn ingest(state: State, whispers: List(Whisper)) -> Nil {
+fn ingest(state: State, whispers: List(Whisper)) -> Result(Int, String) {
   case whispers {
-    [] -> Nil
+    [] -> Ok(0)
     _ ->
-      case
-        process.call(state.hub, waiting: 5000, sending: hub.IngestForeign(
-          whispers,
-          _,
-        ))
-      {
-        Ok(_) -> Nil
-        Error(reason) ->
-          io.println(
-            "reeds: peer " <> state.peer.name <> " ingest failed: " <> reason,
-          )
-      }
+      process.call(state.hub, waiting: 5000, sending: hub.IngestForeign(
+        whispers,
+        _,
+      ))
   }
 }
 
@@ -174,9 +251,13 @@ fn record_poll(state: State, outcomes: List(health.FeedOutcome)) -> Int {
   ))
 }
 
-/// Mirrors the pull side's one-page-per-tick policy; the receiver ignores
-/// the pushed envelope's `more`, the next tick drains the rest.
+/// One read page per tick; `push_body_budget` below is the real bound on
+/// what each POST carries, the count only caps the hub read.
 const push_batch = 500
+
+/// One publish-limit body still fits `/ingest`'s doubled limit even alone
+/// in its envelope; a whole batch capped here stays comfortably inside it.
+const push_body_budget = 1_048_576
 
 /// POSTs one batch to the peer's `/ingest` and returns the local seq to
 /// resume from. Sent verbatim in the read API's response shape, envelope
@@ -188,6 +269,7 @@ fn push(
   peer: PeerSpec,
   whispers: List(Whisper),
   cursor: Int,
+  more: Bool,
 ) -> Result(Int, String) {
   let next_cursor =
     list.fold(whispers, cursor, fn(acc, w) { int.max(acc, w.seq) })
@@ -203,7 +285,7 @@ fn push(
     |> request.set_body(wire.since_response(
       whispers,
       next_since: next_cursor,
-      more: list.length(whispers) == push_batch,
+      more:,
     ))
   use resp <- result.try(case rescue(fn() { httpc.send(req) }) {
     Ok(sent) ->

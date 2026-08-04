@@ -1517,14 +1517,9 @@ pub fn peer_push_converges_and_resumes_test() {
   assert pushed.origin == "hub1"
   assert pushed.origin_seq == 1
 
-  // PutPeerCursor trails the HTTP response by one hub message; give it a
-  // beat before asserting the persisted outbound cursor.
-  process.sleep(300)
-  let assert 1 =
-    process.call(hub1, waiting: 1000, sending: hub.GetPeerCursor(
-      "push:hub2",
-      _,
-    ))
+  // PutPeerCursor trails the HTTP response by one hub message; poll rather
+  // than assuming a fixed delay.
+  assert await(fn() { push_cursor(hub1, "hub2") == 1 })
 
   // Resume: a fresh actor (standing in for a supervisor restart) must push
   // only what the persisted cursor says is unconfirmed.
@@ -1533,10 +1528,93 @@ pub fn peer_push_converges_and_resumes_test() {
 
   let assert Ok(resumed) = process.receive(inbox2, 3000)
   assert resumed.topic == "agents.turtle2"
+  assert await(fn() { push_cursor(hub1, "hub2") == 2 })
 
   let assert Ok(rows) =
     process.call(hub2, waiting: 1000, sending: hub.ReadSince("*", 0, 10, _))
   assert list.length(rows) == 2
+}
+
+fn push_cursor(
+  hub_subject: process.Subject(hub.Msg),
+  peer_name: String,
+) -> Int {
+  process.call(hub_subject, waiting: 1000, sending: hub.GetPeerCursor(
+    "push:" <> peer_name,
+    _,
+  ))
+}
+
+fn await(check: fn() -> Bool) -> Bool {
+  await_tries(check, 60)
+}
+
+fn await_tries(check: fn() -> Bool, tries: Int) -> Bool {
+  case check(), tries {
+    True, _ -> True
+    False, 0 -> False
+    False, _ -> {
+      process.sleep(50)
+      await_tries(check, tries - 1)
+    }
+  }
+}
+
+/// The invariant the push design rests on: a rejected POST leaves the
+/// outbound cursor untouched, so nothing is marked confirmed that the peer
+/// never accepted. The peer URL points below a path prefix, so `/ingest`
+/// resolves to a 404.
+pub fn peer_push_failure_leaves_cursor_test() {
+  let #(hub1, _port1) = start_bridge("hub1")
+  let #(_hub2, port2) = start_bridge("hub2")
+
+  let assert Ok(1) = publish(hub1, "agents.turtle", 1)
+
+  let broken =
+    config.PeerSpec(
+      name: "hub2",
+      url: "http://127.0.0.1:" <> int.to_string(port2) <> "/nope",
+      token: "",
+      mode: config.Push,
+      interval_ms: 60_000,
+      backoff_cap_ms: 900_000,
+    )
+  let assert Ok(_) = peer.start(broken, hub1)
+
+  // The tick is immediate; wait past it and confirm nothing moved. A too
+  // -early check can only false-pass, never flake red.
+  process.sleep(300)
+  assert push_cursor(hub1, "hub2") == 0
+}
+
+/// `chunk` takes the longest under-budget prefix but never zero whispers:
+/// a single oversized whisper must go alone rather than wedge the loop.
+pub fn peer_chunk_respects_budget_test() {
+  let w = fn(seq: Int, body: String) {
+    Whisper(
+      seq:,
+      topic: "a.b",
+      ts: 1,
+      sender: "t",
+      kind: "note",
+      body:,
+      origin: "hub1",
+      origin_seq: seq,
+      idem: None,
+    )
+  }
+  let small = w(1, "{}")
+  let one_size = string.length(whisper.to_json_string(small))
+
+  assert peer.chunk([], 1000) == []
+  // Everything fits: all taken.
+  assert peer.chunk([small, w(2, "{}")], one_size * 3) == [small, w(2, "{}")]
+  // Second whisper would cross the budget: prefix only.
+  assert peer.chunk([small, w(2, "{}"), w(3, "{}")], one_size + 1) == [small]
+  // Over budget on its own: still taken, alone.
+  assert peer.chunk([w(1, "{\"big\":\"payload\"}")], 1) == [
+    w(1, "{\"big\":\"payload\"}"),
+  ]
 }
 
 /// A `both`-mode peer converges in both directions through one outbound
