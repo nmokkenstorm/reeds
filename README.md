@@ -42,8 +42,16 @@ peer token once you do.
 | `GET /t/:prefix/events`  | SSE tail; `?since=N` or `Last-Event-ID` to resume.                                                                                                   |
 | `POST /ingest`           | Peer push: body is a `GET /t/*?since=N` response. Same wire shape, no second format. Returns `{"accepted": n, "cursors": {origin: max_origin_seq}}`. |
 | `GET /health`            | Per-source health. `ok` is false when any source is down.                                                                                            |
+| `GET /state?prefix=P`    | Latest whisper per topic under `P`, tombstones dropped.                                                                                              |
+| `GET /dashboard`         | Static page that polls `/state` and renders it.                                                                                                      |
 
 Headers on publish: `x-reeds-sender`, `x-reeds-kind` (both optional).
+
+`/state` folds the log rather than replaying it: one entry per topic, the
+latest whisper only, minus topics whose latest kind is `pr.gone`, `mr.gone`,
+or `done`. It is honest about being event-sourced: an entry means "this was
+last whispered", not "this is currently true". `/dashboard` groups entries by
+topic prefix and shows ages; `needs-user` whispers get a dedicated lane.
 
 ### Auth
 

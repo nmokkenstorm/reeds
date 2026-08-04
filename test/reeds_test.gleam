@@ -19,6 +19,7 @@ import reeds/sources/bitbucket
 import reeds/sources/github
 import reeds/sources/gitlab
 import reeds/sources/poller
+import reeds/state
 import reeds/store
 import reeds/whisper.{type Whisper, Whisper}
 import reeds/wire
@@ -399,6 +400,152 @@ pub fn store_migrates_legacy_schema_test() {
   assert next_origin_seq == row.origin_seq + 1
   let assert Ok(Nil) = sqlight.close(migrated)
   let assert Ok(Nil) = simplifile.delete(path)
+}
+
+pub fn store_read_state_folds_latest_per_topic_test() {
+  let assert Ok(conn) = store.open(":memory:", origin: "test")
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.12",
+      ts: 1,
+      sender: "t",
+      kind: "pr.seen",
+      body: "{\"n\":1}",
+      origin: "test",
+      idem: None,
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.12",
+      ts: 2,
+      sender: "t",
+      kind: "pr.updated",
+      body: "{\"n\":2}",
+      origin: "test",
+      idem: None,
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.13",
+      ts: 3,
+      sender: "t",
+      kind: "pr.seen",
+      body: "{\"n\":3}",
+      origin: "test",
+      idem: None,
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "other.topic",
+      ts: 4,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+      origin: "test",
+      idem: None,
+    )
+
+  let assert Ok([twelve, thirteen]) =
+    store.read_state(conn, prefix: "bb.pr", has_origin: False)
+  assert twelve.topic == "bb.pr.api.12"
+  assert twelve.kind == "pr.updated"
+  assert twelve.body == "{\"n\":2}"
+  assert thirteen.topic == "bb.pr.api.13"
+}
+
+pub fn store_read_state_excludes_tombstones_test() {
+  let assert Ok(conn) = store.open(":memory:", origin: "test")
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.12",
+      ts: 1,
+      sender: "t",
+      kind: "pr.seen",
+      body: "{}",
+      origin: "test",
+      idem: None,
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.12",
+      ts: 2,
+      sender: "t",
+      kind: "pr.gone",
+      body: "{}",
+      origin: "test",
+      idem: None,
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "agents.turtle.riot",
+      ts: 3,
+      sender: "t",
+      kind: "done",
+      body: "{}",
+      origin: "test",
+      idem: None,
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "gl.mr.app.1",
+      ts: 4,
+      sender: "t",
+      kind: "mr.gone",
+      body: "{}",
+      origin: "test",
+      idem: None,
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.14",
+      ts: 5,
+      sender: "t",
+      kind: "pr.seen",
+      body: "{}",
+      origin: "test",
+      idem: None,
+    )
+
+  let assert Ok([only]) = store.read_state(conn, prefix: "*", has_origin: False)
+  assert only.topic == "bb.pr.api.14"
+}
+
+pub fn store_has_origin_column_test() {
+  // Only a raw pre-mesh table lacks the column; store.open migrates it in.
+  let assert Ok(bare) = sqlight.open(":memory:")
+  let assert Ok(Nil) =
+    sqlight.exec("create table messages(seq integer primary key)", bare)
+  assert store.has_origin_column(bare) == False
+
+  let assert Ok(conn) = store.open(":memory:", origin: "test")
+  assert store.has_origin_column(conn) == True
+}
+
+pub fn store_read_state_includes_origin_when_present_test() {
+  let assert Ok(conn) = store.open(":memory:", origin: "test")
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "a.b",
+      ts: 1,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+      origin: "congos-tools",
+      idem: None,
+    )
+
+  let assert Ok([entry]) = store.read_state(conn, prefix: "*", has_origin: True)
+  assert entry.origin == Some("congos-tools")
 }
 
 pub fn source_state_test() {
@@ -1180,6 +1327,47 @@ pub fn ingest_route_rejects_malformed_body_test() {
   assert resp.status == 400
 }
 
+pub fn hub_read_state_folds_and_excludes_tombstones_test() {
+  let assert Ok(conn) = store.open(":memory:", origin: "test")
+  let assert Ok(started) = hub.start(conn, "test")
+  let h = started.data
+
+  let assert Ok(1) =
+    process.call(h, waiting: 1000, sending: hub.Publish(
+      "bb.pr.api.12",
+      "t",
+      "pr.seen",
+      "{\"n\":1}",
+      None,
+      _,
+    ))
+  let assert Ok(2) =
+    process.call(h, waiting: 1000, sending: hub.Publish(
+      "bb.pr.api.12",
+      "t",
+      "pr.updated",
+      "{\"n\":2}",
+      None,
+      _,
+    ))
+  let assert Ok(3) =
+    process.call(h, waiting: 1000, sending: hub.Publish(
+      "bb.pr.api.13",
+      "t",
+      "pr.gone",
+      "{}",
+      None,
+      _,
+    ))
+
+  let assert Ok([only]) =
+    process.call(h, waiting: 1000, sending: hub.ReadState("bb.pr", _))
+  assert only.topic == "bb.pr.api.12"
+  assert only.kind == "pr.updated"
+  // Local publishes carry the hub's own origin since the mesh migration.
+  assert only.origin == Some("test")
+}
+
 @external(erlang, "reeds_rescue_ffi", "rescue")
 fn rescue(thunk: fn() -> a) -> Result(a, String)
 
@@ -1231,4 +1419,70 @@ pub fn valid_bearer_rejects_all_when_no_peers_configured_test() {
 pub fn rescue_turns_a_raise_into_an_error_test() {
   let assert Error(detail) = rescue(fn() { raise("socket_closed_remotely") })
   assert string.contains(detail, "socket_closed_remotely")
+}
+
+pub fn state_is_tombstone_test() {
+  [
+    #("pr.gone", True),
+    #("mr.gone", True),
+    #("done", True),
+    #("pr.seen", False),
+    #("needs-user", False),
+    #("status", False),
+  ]
+  |> list.each(fn(case_) {
+    let #(kind, expected) = case_
+    assert state.is_tombstone(kind) == expected
+  })
+}
+
+pub fn state_entry_json_without_origin_test() {
+  let entry =
+    state.Entry(
+      topic: "bb.pr.api.12",
+      ts: 123,
+      sender: "turtle",
+      kind: "pr.seen",
+      body: "{\"title\":\"fix\"}",
+      origin: None,
+    )
+  assert state.to_json_string(entry)
+    == "{\"topic\":\"bb.pr.api.12\",\"ts\":123,\"sender\":\"turtle\",\"kind\":\"pr.seen\",\"body\":{\"title\":\"fix\"}}"
+}
+
+pub fn state_entry_json_with_origin_test() {
+  let entry =
+    state.Entry(
+      topic: "bb.pr.api.12",
+      ts: 123,
+      sender: "turtle",
+      kind: "pr.seen",
+      body: "{}",
+      origin: Some("congos-tools"),
+    )
+  assert state.to_json_string(entry)
+    == "{\"topic\":\"bb.pr.api.12\",\"ts\":123,\"sender\":\"turtle\",\"kind\":\"pr.seen\",\"origin\":\"congos-tools\",\"body\":{}}"
+}
+
+pub fn state_list_to_json_string_test() {
+  let entries = [
+    state.Entry(
+      topic: "a.b",
+      ts: 1,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+      origin: None,
+    ),
+    state.Entry(
+      topic: "a.c",
+      ts: 2,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+      origin: None,
+    ),
+  ]
+  assert state.list_to_json_string(entries)
+    == "[{\"topic\":\"a.b\",\"ts\":1,\"sender\":\"t\",\"kind\":\"note\",\"body\":{}},{\"topic\":\"a.c\",\"ts\":2,\"sender\":\"t\",\"kind\":\"note\",\"body\":{}}]"
 }

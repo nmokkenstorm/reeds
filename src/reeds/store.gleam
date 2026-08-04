@@ -6,6 +6,7 @@ import gleam/result
 import reeds/health.{
   type FeedHealth, type FeedOutcome, FeedHealth, Reached, Unreachable,
 }
+import reeds/state.{type Entry, Entry}
 import reeds/whisper.{type Whisper, Whisper}
 import sqlight.{type Connection, type Error}
 
@@ -70,7 +71,7 @@ fn migrate(conn: Connection, origin: String) -> Result(Nil, Error) {
   use exists <- result.try(has_messages_table(conn))
   use needs_backfill <- result.try(case exists {
     False -> Ok(False)
-    True -> has_origin_column(conn) |> result.map(fn(has) { !has })
+    True -> origin_column_exists(conn) |> result.map(fn(has) { !has })
   })
   use _ <- result.try(case needs_backfill {
     True -> backfill_origin(conn, origin)
@@ -89,7 +90,7 @@ fn has_messages_table(conn: Connection) -> Result(Bool, Error) {
   |> result.map(fn(rows) { rows != [] })
 }
 
-fn has_origin_column(conn: Connection) -> Result(Bool, Error) {
+fn origin_column_exists(conn: Connection) -> Result(Bool, Error) {
   sqlight.query(
     "select 1 from pragma_table_info('messages') where name = 'origin'",
     on: conn,
@@ -304,6 +305,77 @@ pub fn read_since(
         expecting: whisper_decoder(),
       )
   }
+}
+
+/// True once mesh-core's origin-tagging migration has run. Read on every
+/// fold rather than cached at open time, so a database migrated mid-process
+/// (or a fresh one) is picked up without a restart.
+pub fn has_origin_column(conn: Connection) -> Bool {
+  sqlight.query(
+    "select 1 from pragma_table_info('messages') where name = 'origin'",
+    on: conn,
+    with: [],
+    expecting: decode.field(0, decode.int, decode.success),
+  )
+  |> result.map(fn(rows) { rows != [] })
+  |> result.unwrap(False)
+}
+
+fn entry_decoder(has_origin has_origin: Bool) -> decode.Decoder(Entry) {
+  use topic <- decode.field(0, decode.string)
+  use ts <- decode.field(1, decode.int)
+  use sender <- decode.field(2, decode.string)
+  use kind <- decode.field(3, decode.string)
+  use body <- decode.field(4, decode.string)
+  case has_origin {
+    False ->
+      decode.success(Entry(topic:, ts:, sender:, kind:, body:, origin: None))
+    True -> {
+      use origin <- decode.field(5, decode.optional(decode.string))
+      decode.success(Entry(topic:, ts:, sender:, kind:, body:, origin:))
+    }
+  }
+}
+
+/// The state fold: latest whisper per topic under `prefix`, tombstoned
+/// topics dropped. `has_origin` picks the column list so a database that
+/// predates mesh-core's origin migration is never queried for a column it
+/// does not have.
+pub fn read_state(
+  conn: Connection,
+  prefix prefix: String,
+  has_origin has_origin: Bool,
+) -> Result(List(Entry), Error) {
+  let cols = case has_origin {
+    True -> "topic, ts, sender, kind, body, origin"
+    False -> "topic, ts, sender, kind, body"
+  }
+  let decoder = entry_decoder(has_origin:)
+  let rows = case prefix {
+    "*" -> {
+      let sql = "select " <> cols <> " from messages
+         where seq in (select max(seq) from messages group by topic)
+         order by topic asc"
+      sqlight.query(sql, on: conn, with: [], expecting: decoder)
+    }
+    _ -> {
+      let sql = "select " <> cols <> " from messages
+         where seq in (
+           select max(seq) from messages
+           where (topic = ?1 or substr(topic, 1, length(?1) + 1) = ?1 || '.')
+           group by topic
+         )
+         order by topic asc"
+      sqlight.query(
+        sql,
+        on: conn,
+        with: [sqlight.text(prefix)],
+        expecting: decoder,
+      )
+    }
+  }
+  rows
+  |> result.map(list.filter(_, fn(entry) { !state.is_tombstone(entry.kind) }))
 }
 
 pub fn get_source_state(
