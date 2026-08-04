@@ -7,7 +7,7 @@ import gleam/otp/static_supervisor as supervisor
 import gleam/result
 import mist
 import reeds/api
-import reeds/config.{type PeerSpec, type SourceSpec, Push}
+import reeds/config.{type PeerSpec, type SourceSpec, Both, Pull, Push}
 import reeds/health
 import reeds/hub
 import reeds/peer
@@ -46,10 +46,7 @@ pub fn main() {
     list.partition(config.sources, fn(spec) { spec.enabled })
   list.each(disabled, announce_disabled)
   let sources = list.map(active, build_source)
-  // A `push`-only peer has no pull loop to run yet; `both` still gets one,
-  // since pulling is the half of it that exists.
-  let pulling_peers = list.filter(config.peers, fn(p) { p.mode != Push })
-  list.each(pulling_peers, announce_peer)
+  list.each(config.peers, announce_peer)
 
   let peer_tokens = list.map(config.peers, fn(peer) { peer.token })
   let web =
@@ -63,7 +60,7 @@ pub fn main() {
     |> list.fold(sources, _, fn(sup, src) {
       supervisor.add(sup, source.supervised(src, hub_subject))
     })
-    |> list.fold(pulling_peers, _, fn(sup, p) {
+    |> list.fold(config.peers, _, fn(sup, p) {
       supervisor.add(sup, peer.supervised(p, hub_subject))
     })
     |> supervisor.add(mist.supervised(web))
@@ -80,7 +77,7 @@ pub fn main() {
           enabled: spec.enabled,
         )
       }),
-      list.map(pulling_peers, fn(p) {
+      list.map(config.peers, fn(p) {
         health.Registration(
           name: "peer-" <> p.name,
           kind: "peer",
@@ -112,7 +109,14 @@ fn announce_disabled(spec: SourceSpec) -> Nil {
 }
 
 fn announce_peer(peer: PeerSpec) -> Nil {
-  io.println("reeds: peer " <> peer.name <> " (" <> peer.url <> ") pulling")
+  let direction = case peer.mode {
+    Pull -> "pulling"
+    Push -> "pushing"
+    Both -> "pulling+pushing"
+  }
+  io.println(
+    "reeds: peer " <> peer.name <> " (" <> peer.url <> ") " <> direction,
+  )
 }
 
 /// A source that fails validation refuses the whole boot: a daemon quietly

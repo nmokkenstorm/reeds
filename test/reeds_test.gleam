@@ -1436,6 +1436,143 @@ pub fn peer_pull_converges_and_never_round_trips_test() {
   assert list.length(hub1_rows) == 2
 }
 
+fn push_peer(name: String, port: Int, mode: config.PeerMode) -> config.PeerSpec {
+  config.PeerSpec(
+    name:,
+    url: "http://127.0.0.1:" <> int.to_string(port),
+    token: "",
+    mode:,
+    interval_ms: 60_000,
+    backoff_cap_ms: 900_000,
+  )
+}
+
+fn publish(
+  hub_subject: process.Subject(hub.Msg),
+  topic: String,
+  n: Int,
+) -> Result(Int, String) {
+  process.call(hub_subject, waiting: 1000, sending: hub.Publish(
+    topic,
+    "t",
+    "note",
+    "{\"n\":" <> int.to_string(n) <> "}",
+    None,
+    _,
+  ))
+}
+
+/// `since_response` and `parse_since_response` are the two halves of one
+/// wire format; a batch must survive the round trip byte-relevant intact,
+/// tricky body and all.
+pub fn wire_since_response_roundtrip_test() {
+  let whispers = [
+    Whisper(
+      seq: 3,
+      topic: "gh.pr.tools.7",
+      ts: 100,
+      sender: "gh",
+      kind: "pr.seen",
+      body: "{\"nested\":{\"list\":[1,2]},\"quote\":\"she said \\\"hi\\\"\"}",
+      origin: "hub1",
+      origin_seq: 3,
+      idem: Some("7:2026-07-28T09:00:00Z"),
+    ),
+    Whisper(
+      seq: 4,
+      topic: "agents.turtle",
+      ts: 200,
+      sender: "turtle",
+      kind: "note",
+      body: "{}",
+      origin: "hub2",
+      origin_seq: 1,
+      idem: None,
+    ),
+  ]
+  let text = wire.since_response(whispers, next_since: 4, more: True)
+  let assert Ok(#(parsed, 4, True)) = wire.parse_since_response(text)
+  assert parsed == whispers
+  let assert Ok(#([], 0, False)) =
+    wire.parse_since_response(wire.since_response([], next_since: 0, more: False))
+}
+
+/// The push half of Phase 4's done-criteria over a real HTTP round trip: a
+/// push-mode peer delivers home whispers to the peer's `/ingest`, persists
+/// its outbound cursor, and a restarted actor resumes from that cursor
+/// instead of re-pushing history.
+pub fn peer_push_converges_and_resumes_test() {
+  let #(hub1, _port1) = start_bridge("hub1")
+  let #(hub2, port2) = start_bridge("hub2")
+
+  let assert Ok(1) = publish(hub1, "agents.turtle", 1)
+
+  let inbox2 = process.new_subject()
+  process.send(hub2, hub.Subscribe("*", 0, inbox2))
+
+  let assert Ok(_) = peer.start(push_peer("hub2", port2, config.Push), hub1)
+
+  let assert Ok(pushed) = process.receive(inbox2, 3000)
+  assert pushed.topic == "agents.turtle"
+  assert pushed.origin == "hub1"
+  assert pushed.origin_seq == 1
+
+  // PutPeerCursor trails the HTTP response by one hub message; give it a
+  // beat before asserting the persisted outbound cursor.
+  process.sleep(300)
+  let assert 1 =
+    process.call(hub1, waiting: 1000, sending: hub.GetPeerCursor(
+      "push:hub2",
+      _,
+    ))
+
+  // Resume: a fresh actor (standing in for a supervisor restart) must push
+  // only what the persisted cursor says is unconfirmed.
+  let assert Ok(2) = publish(hub1, "agents.turtle2", 2)
+  let assert Ok(_) = peer.start(push_peer("hub2", port2, config.Push), hub1)
+
+  let assert Ok(resumed) = process.receive(inbox2, 3000)
+  assert resumed.topic == "agents.turtle2"
+
+  let assert Ok(rows) =
+    process.call(hub2, waiting: 1000, sending: hub.ReadSince("*", 0, 10, _))
+  assert list.length(rows) == 2
+}
+
+/// A `both`-mode peer converges in both directions through one outbound
+/// connection: the NAT'd-laptop scenario, where hub1 can dial hub2 but not
+/// the reverse.
+pub fn peer_both_mode_converges_bidirectionally_test() {
+  let #(hub1, _port1) = start_bridge("hub1")
+  let #(hub2, port2) = start_bridge("hub2")
+
+  let assert Ok(1) = publish(hub1, "agents.laptop", 1)
+  let assert Ok(1) = publish(hub2, "agents.hub", 2)
+
+  // Both logs already hold their own seq 1; subscribing from 1 skips the
+  // replay so the first delivery on each inbox is the synced foreign whisper.
+  let inbox1 = process.new_subject()
+  process.send(hub1, hub.Subscribe("*", 1, inbox1))
+  let inbox2 = process.new_subject()
+  process.send(hub2, hub.Subscribe("*", 1, inbox2))
+
+  let assert Ok(_) = peer.start(push_peer("hub2", port2, config.Both), hub1)
+
+  let assert Ok(pulled) = process.receive(inbox1, 3000)
+  assert pulled.topic == "agents.hub"
+  assert pulled.origin == "hub2"
+  let assert Ok(pushed) = process.receive(inbox2, 3000)
+  assert pushed.topic == "agents.laptop"
+  assert pushed.origin == "hub1"
+
+  let assert Ok(rows1) =
+    process.call(hub1, waiting: 1000, sending: hub.ReadSince("*", 0, 10, _))
+  let assert Ok(rows2) =
+    process.call(hub2, waiting: 1000, sending: hub.ReadSince("*", 0, 10, _))
+  assert list.length(rows1) == 2
+  assert list.length(rows2) == 2
+}
+
 /// POST /ingest accepts a since-response-shaped batch, dedups on each
 /// whisper's own (origin, origin_seq), assigns local seqs, and reports the
 /// per-origin high-water mark so a pusher can advance without a read
