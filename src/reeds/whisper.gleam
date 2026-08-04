@@ -1,5 +1,6 @@
 import gleam/json
 import gleam/list
+import gleam/option.{type Option}
 import gleam/string
 
 pub type Whisper {
@@ -10,6 +11,9 @@ pub type Whisper {
     sender: String,
     kind: String,
     body: String,
+    origin: String,
+    origin_seq: Int,
+    idem: Option(String),
   )
 }
 
@@ -36,7 +40,9 @@ fn valid_segment(segment: String) -> Bool {
 }
 
 /// body is already-validated JSON, so it is spliced in raw rather than
-/// re-encoded, which would double-escape it.
+/// re-encoded, which would double-escape it. It stays the last field so mesh
+/// ingest can recover its raw text by splitting on the literal `"body":`
+/// marker instead of re-decoding and re-serialising it.
 pub fn to_json_string(whisper: Whisper) -> String {
   let head =
     json.object([
@@ -45,6 +51,9 @@ pub fn to_json_string(whisper: Whisper) -> String {
       #("ts", json.int(whisper.ts)),
       #("sender", json.string(whisper.sender)),
       #("kind", json.string(whisper.kind)),
+      #("origin", json.string(whisper.origin)),
+      #("origin_seq", json.int(whisper.origin_seq)),
+      #("idem", json.nullable(whisper.idem, json.string)),
     ])
     |> json.to_string
   string.drop_end(head, 1) <> ",\"body\":" <> whisper.body <> "}"

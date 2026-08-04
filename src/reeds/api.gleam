@@ -1,5 +1,6 @@
 import gleam/bit_array
 import gleam/bytes_tree
+import gleam/dict
 import gleam/dynamic/decode
 import gleam/erlang/process.{type Subject}
 import gleam/http.{Get, Post}
@@ -8,29 +9,75 @@ import gleam/http/response.{type Response}
 import gleam/int
 import gleam/json
 import gleam/list
+import gleam/option.{Some}
 import gleam/otp/actor
 import gleam/result
+import gleam/string
 import gleam/string_tree
 import mist.{type Connection, type ResponseData}
 import reeds/health as health_module
 import reeds/hub
 import reeds/whisper.{type Whisper}
+import reeds/wire
 
 const max_body = 1_048_576
 
 const max_page = 1000
 
+/// Loopback requests are unauthenticated; anything else must carry a
+/// `Bearer` token matching a configured peer. Checked ahead of routing, so
+/// no route can be reached by accident.
 pub fn handler(
   hub: Subject(hub.Msg),
+  peer_tokens: List(String),
 ) -> fn(Request(Connection)) -> Response(ResponseData) {
   fn(req) {
-    case request.path_segments(req), req.method {
-      ["health"], Get -> health(hub)
-      ["t", topic], Post -> publish(hub, req, topic)
-      ["t", prefix], Get -> read_since(hub, req, prefix)
-      ["t", prefix, "events"], Get -> sse(hub, req, prefix)
-      _, _ -> json_response(404, "{\"error\":\"not found\"}")
+    case authorized(req, peer_tokens) {
+      False -> error_response(401, "unauthorized")
+      True ->
+        case request.path_segments(req), req.method {
+          ["health"], Get -> health(hub)
+          ["t", topic], Post -> publish(hub, req, topic)
+          ["t", prefix], Get -> read_since(hub, req, prefix)
+          ["t", prefix, "events"], Get -> sse(hub, req, prefix)
+          ["ingest"], Post -> ingest(hub, req)
+          _, _ -> json_response(404, "{\"error\":\"not found\"}")
+        }
     }
+  }
+}
+
+fn authorized(req: Request(Connection), peer_tokens: List(String)) -> Bool {
+  let loopback = case mist.get_connection_info(req.body) {
+    Ok(info) -> is_loopback_ip(info.ip_address)
+    Error(_) -> False
+  }
+  loopback
+  || valid_bearer(request.get_header(req, "authorization"), peer_tokens)
+}
+
+/// 127.0.0.0/8 and the IPv6 loopback `::1`; nothing else counts, so a
+/// misconfigured reverse proxy on the same box cannot silently skip auth.
+pub fn is_loopback_ip(ip: mist.IpAddress) -> Bool {
+  case ip {
+    mist.IpV4(127, _, _, _) -> True
+    mist.IpV6(0, 0, 0, 0, 0, 0, 0, 1) -> True
+    _ -> False
+  }
+}
+
+pub fn valid_bearer(
+  header: Result(String, Nil),
+  peer_tokens: List(String),
+) -> Bool {
+  case header {
+    Error(_) -> False
+    Ok(value) ->
+      case string.split_once(value, on: " ") {
+        Ok(#("Bearer", token)) ->
+          token != "" && list.contains(peer_tokens, token)
+        _ -> False
+      }
   }
 }
 
@@ -77,6 +124,7 @@ fn publish(
               sender,
               kind,
               body,
+              option.None,
               _,
             ))
           {
@@ -123,6 +171,64 @@ fn read_since(
       )
     }
   }
+}
+
+/// Receiving side of a peer push: body is a `/t/*?since=N` response verbatim
+/// (the same wire shape `wire.parse_since_response` already reads for the
+/// pull loop), so a pusher can forward its own read of `read_since` without
+/// reshaping it. `next_since`/`more` are the pusher's own cursor bookkeeping
+/// and irrelevant here. `cursors` is computed from the batch itself, not
+/// from `IngestForeign`'s accepted count, since a dedup no-op still confirms
+/// its origin_seq was received.
+fn ingest(
+  hub: Subject(hub.Msg),
+  req: Request(Connection),
+) -> Response(ResponseData) {
+  let parsed =
+    mist.read_body(req, max_body_limit: max_body)
+    |> result.replace_error("unreadable body")
+    |> result.try(fn(read) {
+      bit_array.to_string(read.body)
+      |> result.replace_error("body is not utf8")
+    })
+    |> result.try(wire.parse_since_response)
+  case parsed {
+    Error(reason) -> error_response(400, reason)
+    Ok(#(whispers, _next_since, _more)) ->
+      case
+        process.call(hub, waiting: 5000, sending: hub.IngestForeign(whispers, _))
+      {
+        Error(reason) -> error_response(500, reason)
+        Ok(accepted) ->
+          json_response(
+            200,
+            "{\"accepted\":"
+              <> int.to_string(accepted)
+              <> ",\"cursors\":"
+              <> cursors_json(whispers)
+              <> "}",
+          )
+      }
+  }
+}
+
+/// The highest `origin_seq` seen per origin in this batch, whether or not
+/// the whisper turned out to be a dedup no-op: a duplicate still confirms
+/// the pusher's cursor is caught up to that point.
+fn cursors_json(whispers: List(Whisper)) -> String {
+  whispers
+  |> list.fold(dict.new(), fn(cursors, w) {
+    dict.upsert(cursors, w.origin, fn(existing) {
+      case existing {
+        Some(seq) if seq >= w.origin_seq -> seq
+        _ -> w.origin_seq
+      }
+    })
+  })
+  |> dict.to_list
+  |> list.map(fn(pair) { #(pair.0, json.int(pair.1)) })
+  |> json.object
+  |> json.to_string
 }
 
 fn sse(

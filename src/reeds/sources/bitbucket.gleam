@@ -92,6 +92,7 @@ fn pr_decoder(repo: String) -> decode.Decoder(poller.Item) {
   decode.success(poller.Item(
     id: int.to_string(id),
     fingerprint: state <> "|" <> updated_on,
+    idem: int.to_string(id) <> ":" <> updated_on,
     body: json.to_string(
       json.object([
         #("repo", json.string(repo)),
@@ -127,6 +128,7 @@ fn pipeline_decoder(repo: String) -> decode.Decoder(poller.Item) {
   decode.success(poller.Item(
     id: int.to_string(build),
     fingerprint: state <> "|" <> result,
+    idem: int.to_string(build) <> ":" <> state <> ":" <> result,
     body: json.to_string(
       json.object([
         #("repo", json.string(repo)),
