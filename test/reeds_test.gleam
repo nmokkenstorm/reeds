@@ -12,8 +12,10 @@ import reeds/sources/bitbucket
 import reeds/sources/github
 import reeds/sources/gitlab
 import reeds/sources/poller
+import reeds/state
 import reeds/store
 import reeds/whisper.{Whisper}
+import sqlight
 
 pub fn main() {
   gleeunit.main()
@@ -122,6 +124,136 @@ pub fn store_rejects_invalid_json_test() {
       kind: "note",
       body: "not json",
     )
+}
+
+pub fn store_read_state_folds_latest_per_topic_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.12",
+      ts: 1,
+      sender: "t",
+      kind: "pr.seen",
+      body: "{\"n\":1}",
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.12",
+      ts: 2,
+      sender: "t",
+      kind: "pr.updated",
+      body: "{\"n\":2}",
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.13",
+      ts: 3,
+      sender: "t",
+      kind: "pr.seen",
+      body: "{\"n\":3}",
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "other.topic",
+      ts: 4,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+    )
+
+  let assert Ok([twelve, thirteen]) =
+    store.read_state(conn, prefix: "bb.pr", has_origin: False)
+  assert twelve.topic == "bb.pr.api.12"
+  assert twelve.kind == "pr.updated"
+  assert twelve.body == "{\"n\":2}"
+  assert thirteen.topic == "bb.pr.api.13"
+}
+
+pub fn store_read_state_excludes_tombstones_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.12",
+      ts: 1,
+      sender: "t",
+      kind: "pr.seen",
+      body: "{}",
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.12",
+      ts: 2,
+      sender: "t",
+      kind: "pr.gone",
+      body: "{}",
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "agents.turtle.riot",
+      ts: 3,
+      sender: "t",
+      kind: "done",
+      body: "{}",
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "gl.mr.app.1",
+      ts: 4,
+      sender: "t",
+      kind: "mr.gone",
+      body: "{}",
+    )
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "bb.pr.api.14",
+      ts: 5,
+      sender: "t",
+      kind: "pr.seen",
+      body: "{}",
+    )
+
+  let assert Ok([only]) = store.read_state(conn, prefix: "*", has_origin: False)
+  assert only.topic == "bb.pr.api.14"
+}
+
+pub fn store_has_origin_column_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  assert store.has_origin_column(conn) == False
+  let assert Ok(Nil) =
+    sqlight.exec("alter table messages add column origin text", conn)
+  assert store.has_origin_column(conn) == True
+}
+
+pub fn store_read_state_includes_origin_when_present_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(Nil) =
+    sqlight.exec("alter table messages add column origin text", conn)
+  let assert Ok(_) =
+    store.append(
+      conn,
+      topic: "a.b",
+      ts: 1,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+    )
+  let assert Ok(Nil) =
+    sqlight.exec(
+      "update messages set origin = 'congos-tools' where topic = 'a.b'",
+      conn,
+    )
+
+  let assert Ok([entry]) = store.read_state(conn, prefix: "*", has_origin: True)
+  assert entry.origin == Some("congos-tools")
 }
 
 pub fn source_state_test() {
@@ -608,6 +740,43 @@ pub fn hub_publish_subscribe_test() {
   assert list.length(all) == 3
 }
 
+pub fn hub_read_state_folds_and_excludes_tombstones_test() {
+  let assert Ok(conn) = store.open(":memory:")
+  let assert Ok(started) = hub.start(conn)
+  let h = started.data
+
+  let assert Ok(1) =
+    process.call(h, waiting: 1000, sending: hub.Publish(
+      "bb.pr.api.12",
+      "t",
+      "pr.seen",
+      "{\"n\":1}",
+      _,
+    ))
+  let assert Ok(2) =
+    process.call(h, waiting: 1000, sending: hub.Publish(
+      "bb.pr.api.12",
+      "t",
+      "pr.updated",
+      "{\"n\":2}",
+      _,
+    ))
+  let assert Ok(3) =
+    process.call(h, waiting: 1000, sending: hub.Publish(
+      "bb.pr.api.13",
+      "t",
+      "pr.gone",
+      "{}",
+      _,
+    ))
+
+  let assert Ok([only]) =
+    process.call(h, waiting: 1000, sending: hub.ReadState("bb.pr", _))
+  assert only.topic == "bb.pr.api.12"
+  assert only.kind == "pr.updated"
+  assert only.origin == None
+}
+
 @external(erlang, "reeds_rescue_ffi", "rescue")
 fn rescue(thunk: fn() -> a) -> Result(a, String)
 
@@ -621,4 +790,70 @@ pub fn rescue_passes_a_value_through_test() {
 pub fn rescue_turns_a_raise_into_an_error_test() {
   let assert Error(detail) = rescue(fn() { raise("socket_closed_remotely") })
   assert string.contains(detail, "socket_closed_remotely")
+}
+
+pub fn state_is_tombstone_test() {
+  [
+    #("pr.gone", True),
+    #("mr.gone", True),
+    #("done", True),
+    #("pr.seen", False),
+    #("needs-user", False),
+    #("status", False),
+  ]
+  |> list.each(fn(case_) {
+    let #(kind, expected) = case_
+    assert state.is_tombstone(kind) == expected
+  })
+}
+
+pub fn state_entry_json_without_origin_test() {
+  let entry =
+    state.Entry(
+      topic: "bb.pr.api.12",
+      ts: 123,
+      sender: "turtle",
+      kind: "pr.seen",
+      body: "{\"title\":\"fix\"}",
+      origin: None,
+    )
+  assert state.to_json_string(entry)
+    == "{\"topic\":\"bb.pr.api.12\",\"ts\":123,\"sender\":\"turtle\",\"kind\":\"pr.seen\",\"body\":{\"title\":\"fix\"}}"
+}
+
+pub fn state_entry_json_with_origin_test() {
+  let entry =
+    state.Entry(
+      topic: "bb.pr.api.12",
+      ts: 123,
+      sender: "turtle",
+      kind: "pr.seen",
+      body: "{}",
+      origin: Some("congos-tools"),
+    )
+  assert state.to_json_string(entry)
+    == "{\"topic\":\"bb.pr.api.12\",\"ts\":123,\"sender\":\"turtle\",\"kind\":\"pr.seen\",\"origin\":\"congos-tools\",\"body\":{}}"
+}
+
+pub fn state_list_to_json_string_test() {
+  let entries = [
+    state.Entry(
+      topic: "a.b",
+      ts: 1,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+      origin: None,
+    ),
+    state.Entry(
+      topic: "a.c",
+      ts: 2,
+      sender: "t",
+      kind: "note",
+      body: "{}",
+      origin: None,
+    ),
+  ]
+  assert state.list_to_json_string(entries)
+    == "[{\"topic\":\"a.b\",\"ts\":1,\"sender\":\"t\",\"kind\":\"note\",\"body\":{}},{\"topic\":\"a.c\",\"ts\":2,\"sender\":\"t\",\"kind\":\"note\",\"body\":{}}]"
 }

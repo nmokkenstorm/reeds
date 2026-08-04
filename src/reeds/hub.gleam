@@ -6,6 +6,7 @@ import gleam/otp/supervision
 import gleam/result
 import reeds/clock
 import reeds/health
+import reeds/state.{type Entry}
 import reeds/store
 import reeds/whisper.{type Whisper}
 import sqlight.{type Connection}
@@ -27,6 +28,9 @@ pub type Msg {
     limit: Int,
     reply: Subject(Result(List(Whisper), String)),
   )
+  /// The fold: latest whisper per topic under `prefix`, tombstoned topics
+  /// dropped.
+  ReadState(prefix: String, reply: Subject(Result(List(Entry), String)))
   GetSourceState(name: String, reply: Subject(Option(String)))
   PutSourceState(name: String, state: String)
   /// Record one poll's per-feed reachability and reply with the resulting
@@ -78,6 +82,13 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
       subscribe(state, prefix, since, subscriber)
     ReadSince(prefix, since, limit, reply) -> {
       store.read_since(state.conn, prefix:, since:, limit:)
+      |> result.map_error(store.describe)
+      |> process.send(reply, _)
+      actor.continue(state)
+    }
+    ReadState(prefix, reply) -> {
+      let has_origin = store.has_origin_column(state.conn)
+      store.read_state(state.conn, prefix:, has_origin:)
       |> result.map_error(store.describe)
       |> process.send(reply, _)
       actor.continue(state)

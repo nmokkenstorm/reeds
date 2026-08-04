@@ -12,8 +12,10 @@ import gleam/otp/actor
 import gleam/result
 import gleam/string_tree
 import mist.{type Connection, type ResponseData}
+import reeds/dashboard
 import reeds/health as health_module
 import reeds/hub
+import reeds/state
 import reeds/whisper.{type Whisper}
 
 const max_body = 1_048_576
@@ -29,6 +31,8 @@ pub fn handler(
       ["t", topic], Post -> publish(hub, req, topic)
       ["t", prefix], Get -> read_since(hub, req, prefix)
       ["t", prefix, "events"], Get -> sse(hub, req, prefix)
+      ["state"], Get -> get_state(hub, req)
+      ["dashboard"], Get -> dashboard_page()
       _, _ -> json_response(404, "{\"error\":\"not found\"}")
     }
   }
@@ -125,6 +129,27 @@ fn read_since(
   }
 }
 
+fn get_state(
+  hub: Subject(hub.Msg),
+  req: Request(Connection),
+) -> Response(ResponseData) {
+  let prefix = query_string(req, "prefix", "*")
+  case process.call(hub, waiting: 5000, sending: hub.ReadState(prefix, _)) {
+    Error(reason) -> error_response(500, reason)
+    Ok(entries) ->
+      json_response(
+        200,
+        "{\"entries\":" <> state.list_to_json_string(entries) <> "}",
+      )
+  }
+}
+
+fn dashboard_page() -> Response(ResponseData) {
+  response.new(200)
+  |> response.set_header("content-type", "text/html; charset=utf-8")
+  |> response.set_body(mist.Bytes(bytes_tree.from_string(dashboard.page())))
+}
+
 fn sse(
   hub: Subject(hub.Msg),
   req: Request(Connection),
@@ -160,6 +185,17 @@ fn query_int(req: Request(Connection), name: String, default: Int) -> Int {
   |> result.unwrap([])
   |> list.key_find(name)
   |> result.try(int.parse)
+  |> result.unwrap(default)
+}
+
+fn query_string(
+  req: Request(Connection),
+  name: String,
+  default: String,
+) -> String {
+  request.get_query(req)
+  |> result.unwrap([])
+  |> list.key_find(name)
   |> result.unwrap(default)
 }
 
