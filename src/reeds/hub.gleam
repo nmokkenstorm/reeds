@@ -19,6 +19,7 @@ pub type Msg {
     sender: String,
     kind: String,
     body: String,
+    idem: Option(String),
     reply: Subject(Result(Int, String)),
   )
   Subscribe(prefix: String, since: Int, subscriber: Subject(Whisper))
@@ -38,6 +39,13 @@ pub type Msg {
   RecordPoll(name: String, feeds: List(health.FeedOutcome), reply: Subject(Int))
   Health(reply: Subject(Result(List(health.SourceHealth), String)))
   SetRoster(sources: List(health.Registration))
+  /// A peer never pulled from starts at 0, same as `since=0` on the read API.
+  GetPeerCursor(peer: String, reply: Subject(Int))
+  PutPeerCursor(peer: String, cursor: Int)
+  /// Ingest whispers whose origin/origin_seq/idem were already assigned by
+  /// their origin bridge; replies with how many were new rows rather than
+  /// dedup no-ops, purely for the caller's own logging.
+  IngestForeign(whispers: List(Whisper), reply: Subject(Result(Int, String)))
 }
 
 type Sub {
@@ -45,17 +53,23 @@ type Sub {
 }
 
 type State {
-  State(conn: Connection, subs: List(Sub), roster: List(health.Registration))
+  State(
+    conn: Connection,
+    origin: String,
+    subs: List(Sub),
+    roster: List(health.Registration),
+  )
 }
 
-fn initial(conn: Connection) -> State {
-  State(conn:, subs: [], roster: [])
+fn initial(conn: Connection, origin: String) -> State {
+  State(conn:, origin:, subs: [], roster: [])
 }
 
 pub fn start(
   conn: Connection,
+  origin: String,
 ) -> Result(actor.Started(Subject(Msg)), actor.StartError) {
-  actor.new(initial(conn))
+  actor.new(initial(conn, origin))
   |> actor.on_message(handle)
   |> actor.start
 }
@@ -64,10 +78,11 @@ pub fn start(
 /// answering the same named subject that sources and the API hold.
 pub fn supervised(
   conn: Connection,
+  origin: String,
   name: process.Name(Msg),
 ) -> supervision.ChildSpecification(Subject(Msg)) {
   supervision.worker(fn() {
-    actor.new(initial(conn))
+    actor.new(initial(conn, origin))
     |> actor.on_message(handle)
     |> actor.named(name)
     |> actor.start
@@ -76,8 +91,8 @@ pub fn supervised(
 
 fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
   case msg {
-    Publish(topic, sender, kind, body, reply) ->
-      publish(state, topic, sender, kind, body, reply)
+    Publish(topic, sender, kind, body, idem, reply) ->
+      publish(state, topic, sender, kind, body, idem, reply)
     Subscribe(prefix, since, subscriber) ->
       subscribe(state, prefix, since, subscriber)
     ReadSince(prefix, since, limit, reply) -> {
@@ -116,6 +131,17 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
         )
       actor.continue(State(..state, roster: sources))
     }
+    GetPeerCursor(peer, reply) -> {
+      store.get_peer_cursor(state.conn, peer)
+      |> result.unwrap(0)
+      |> process.send(reply, _)
+      actor.continue(state)
+    }
+    PutPeerCursor(peer, cursor) -> {
+      let _ = store.put_peer_cursor(state.conn, peer, cursor)
+      actor.continue(state)
+    }
+    IngestForeign(whispers, reply) -> ingest_foreign(state, whispers, reply)
   }
 }
 
@@ -139,6 +165,7 @@ fn record_poll(
       case health.announce(before, after, now) {
         None -> state
         Some(announcement) -> {
+          let idem = name <> ":" <> health.state_name(after.state)
           let #(state, _) =
             emit(
               state,
@@ -146,6 +173,7 @@ fn record_poll(
               name,
               announcement.kind,
               announcement.body,
+              Some(idem),
             )
           state
         }
@@ -192,40 +220,106 @@ fn publish(
   sender: String,
   kind: String,
   body: String,
+  idem: Option(String),
   reply: Subject(Result(Int, String)),
 ) -> actor.Next(State, Msg) {
-  let #(state, result) = emit(state, topic, sender, kind, body)
+  let #(state, result) = emit(state, topic, sender, kind, body, idem)
   process.send(reply, result)
   actor.continue(state)
 }
 
 /// Append and fan out. Sources publish directly into the hub, bypassing the
 /// API's validation, so this is the backstop that keeps malformed topics out
-/// of the log.
+/// of the log. Every home publish is stamped with this bridge's own origin;
+/// `origin_seq` is computed by `store.append`, not tracked here. A dedup
+/// no-op reports its existing seq but never fans out: nothing new happened.
 fn emit(
   state: State,
   topic: String,
   sender: String,
   kind: String,
   body: String,
+  idem: Option(String),
 ) -> #(State, Result(Int, String)) {
   case whisper.valid_topic(topic) {
     False -> #(state, Error("invalid topic: " <> topic))
     True -> {
       let ts = clock.now_ms()
-      case store.append(state.conn, topic:, ts:, sender:, kind:, body:) {
+      let origin = state.origin
+      case
+        store.append(
+          state.conn,
+          topic:,
+          ts:,
+          sender:,
+          kind:,
+          body:,
+          origin:,
+          idem:,
+        )
+      {
         Error(message) -> #(state, Error(message))
-        Ok(seq) -> {
+        Ok(store.Deduped(seq)) -> #(state, Ok(seq))
+        Ok(store.Inserted(seq:, origin_seq:)) -> {
           let live =
             list.filter(state.subs, fn(sub) { process.is_alive(sub.pid) })
           let published =
-            whisper.Whisper(seq:, topic:, ts:, sender:, kind:, body:)
+            whisper.Whisper(
+              seq:,
+              topic:,
+              ts:,
+              sender:,
+              kind:,
+              body:,
+              origin:,
+              origin_seq:,
+              idem:,
+            )
           live
           |> list.filter(fn(sub) { whisper.matches(topic, sub.prefix) })
           |> list.each(fn(sub) { process.send(sub.subject, published) })
           #(State(..state, subs: live), Ok(seq))
         }
       }
+    }
+  }
+}
+
+/// Ingest a batch from a peer pull. Each whisper keeps its own origin,
+/// origin_seq, and idem verbatim; only the local seq (assigned inside
+/// `append_foreign`) and fan-out are this bridge's to give. Stops and
+/// reports the first error, since a resumed pull will safely re-send
+/// whatever this batch did not reach (dedup makes the retry a no-op).
+fn ingest_foreign(
+  state: State,
+  whispers: List(Whisper),
+  reply: Subject(Result(Int, String)),
+) -> actor.Next(State, Msg) {
+  let result =
+    list.try_fold(whispers, #(state, 0), fn(acc, w) {
+      let #(state, count) = acc
+      case store.append_foreign(state.conn, w) {
+        Error(message) -> Error(message)
+        Ok(None) -> Ok(#(state, count))
+        Ok(Some(seq)) -> {
+          let live =
+            list.filter(state.subs, fn(sub) { process.is_alive(sub.pid) })
+          let published = whisper.Whisper(..w, seq:)
+          live
+          |> list.filter(fn(sub) { whisper.matches(w.topic, sub.prefix) })
+          |> list.each(fn(sub) { process.send(sub.subject, published) })
+          Ok(#(State(..state, subs: live), count + 1))
+        }
+      }
+    })
+  case result {
+    Error(message) -> {
+      process.send(reply, Error(message))
+      actor.continue(state)
+    }
+    Ok(#(state, count)) -> {
+      process.send(reply, Ok(count))
+      actor.continue(state)
     }
   }
 }

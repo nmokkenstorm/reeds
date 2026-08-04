@@ -28,20 +28,22 @@ Env overrides, each taking precedence over the config file: `REEDS_PORT`
 (default 7333), `REEDS_BIND` (default `localhost`), `REEDS_DB` (default
 `reeds.db`), `REEDS_CONFIG` (default `~/.config/reeds/config.toml`).
 
-`REEDS_BIND` defaults to loopback deliberately. The log is unauthenticated and
-anyone who can reach the port can read every whisper and publish new ones, so
-widening it is a decision you make on purpose, not one a default makes for you.
+`REEDS_BIND` defaults to loopback deliberately. Loopback requests are always
+unauthenticated, so widening the bind is a decision you make on purpose, not
+one a default makes for you: anything reaching the port from off-box needs a
+peer token once you do.
 
 ## HTTP API
 
-| Route                    | Effect                                                    |
-| ------------------------ | --------------------------------------------------------- |
-| `POST /t/:topic`         | Publish JSON body. Returns `{"seq": n}`.                  |
-| `GET /t/:prefix?since=N` | Whispers after seq N under prefix. Returns `next_since`.  |
-| `GET /t/:prefix/events`  | SSE tail; `?since=N` or `Last-Event-ID` to resume.        |
-| `GET /health`            | Per-source health. `ok` is false when any source is down. |
-| `GET /state?prefix=P`    | Latest whisper per topic under `P`, tombstones dropped.   |
-| `GET /dashboard`         | Static page that polls `/state` and renders it.           |
+| Route                    | Effect                                                                                                                                               |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `POST /t/:topic`         | Publish JSON body. Returns `{"seq": n}`.                                                                                                             |
+| `GET /t/:prefix?since=N` | Whispers after seq N under prefix. Returns `next_since`.                                                                                             |
+| `GET /t/:prefix/events`  | SSE tail; `?since=N` or `Last-Event-ID` to resume.                                                                                                   |
+| `POST /ingest`           | Peer push: body is a `GET /t/*?since=N` response. Same wire shape, no second format. Returns `{"accepted": n, "cursors": {origin: max_origin_seq}}`. |
+| `GET /health`            | Per-source health. `ok` is false when any source is down.                                                                                            |
+| `GET /state?prefix=P`    | Latest whisper per topic under `P`, tombstones dropped.                                                                                              |
+| `GET /dashboard`         | Static page that polls `/state` and renders it.                                                                                                      |
 
 Headers on publish: `x-reeds-sender`, `x-reeds-kind` (both optional).
 
@@ -50,6 +52,13 @@ latest whisper only, minus topics whose latest kind is `pr.gone`, `mr.gone`,
 or `done`. It is honest about being event-sourced: an entry means "this was
 last whispered", not "this is currently true". `/dashboard` groups entries by
 topic prefix and shows ages; `needs-user` whispers get a dedicated lane.
+
+### Auth
+
+Loopback requests need nothing. Any other request must carry
+`Authorization: Bearer <token>` matching a `[peers.<name>]` token from
+config, or the daemon answers 401 before routing. Tokens are self-asserted
+per bridge, not per sender: see `config.example.toml`.
 
 Topics are dotted lowercase segments (`bb.pr.api.12`). A prefix matches
 whole segments: `bb.pr` matches `bb.pr.x` but not `bb.private`. `*` matches

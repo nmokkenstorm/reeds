@@ -7,9 +7,10 @@ import gleam/otp/static_supervisor as supervisor
 import gleam/result
 import mist
 import reeds/api
-import reeds/config.{type SourceSpec}
+import reeds/config.{type PeerSpec, type SourceSpec, Push}
 import reeds/health
 import reeds/hub
+import reeds/peer
 import reeds/source.{type Source}
 import reeds/sources/bitbucket
 import reeds/sources/github
@@ -28,8 +29,16 @@ pub fn main() {
     |> result.unwrap(config.port)
   let bind = envoy.get("REEDS_BIND") |> result.unwrap(config.bind)
 
-  let assert Ok(conn) = store.open(db_path)
-  io.println("reeds: " <> db_path <> " (sqlite " <> store.version(conn) <> ")")
+  let assert Ok(conn) = store.open(db_path, origin: config.bridge_name)
+  io.println(
+    "reeds: "
+    <> db_path
+    <> " (sqlite "
+    <> store.version(conn)
+    <> ", origin "
+    <> config.bridge_name
+    <> ")",
+  )
 
   let hub_name = process.new_name("reeds_hub")
   let hub_subject = process.named_subject(hub_name)
@@ -37,17 +46,25 @@ pub fn main() {
     list.partition(config.sources, fn(spec) { spec.enabled })
   list.each(disabled, announce_disabled)
   let sources = list.map(active, build_source)
+  // A `push`-only peer has no pull loop to run yet; `both` still gets one,
+  // since pulling is the half of it that exists.
+  let pulling_peers = list.filter(config.peers, fn(p) { p.mode != Push })
+  list.each(pulling_peers, announce_peer)
 
+  let peer_tokens = list.map(config.peers, fn(peer) { peer.token })
   let web =
-    mist.new(api.handler(hub_subject))
+    mist.new(api.handler(hub_subject, peer_tokens))
     |> mist.bind(bind)
     |> mist.port(port)
 
   let assert Ok(_) =
     supervisor.new(supervisor.OneForOne)
-    |> supervisor.add(hub.supervised(conn, hub_name))
+    |> supervisor.add(hub.supervised(conn, config.bridge_name, hub_name))
     |> list.fold(sources, _, fn(sup, src) {
       supervisor.add(sup, source.supervised(src, hub_subject))
+    })
+    |> list.fold(pulling_peers, _, fn(sup, p) {
+      supervisor.add(sup, peer.supervised(p, hub_subject))
     })
     |> supervisor.add(mist.supervised(web))
     |> supervisor.start
@@ -55,7 +72,7 @@ pub fn main() {
   // shows up as disabled or unknown instead of quietly missing.
   process.send(
     hub_subject,
-    hub.SetRoster(
+    hub.SetRoster(list.append(
       list.map(config.sources, fn(spec) {
         health.Registration(
           name: spec.name,
@@ -63,7 +80,14 @@ pub fn main() {
           enabled: spec.enabled,
         )
       }),
-    ),
+      list.map(pulling_peers, fn(p) {
+        health.Registration(
+          name: "peer-" <> p.name,
+          kind: "peer",
+          enabled: True,
+        )
+      }),
+    )),
   )
   io.println(
     "reeds: listening on http://" <> bind <> ":" <> int.to_string(port),
@@ -85,6 +109,10 @@ fn config_path() -> String {
 /// stdout because a silently absent source is the failure mode reeds avoids.
 fn announce_disabled(spec: SourceSpec) -> Nil {
   io.println("reeds: source " <> spec.name <> " (" <> spec.kind <> ") disabled")
+}
+
+fn announce_peer(peer: PeerSpec) -> Nil {
+  io.println("reeds: peer " <> peer.name <> " (" <> peer.url <> ") pulling")
 }
 
 /// A source that fails validation refuses the whole boot: a daemon quietly
