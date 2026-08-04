@@ -64,22 +64,133 @@ pub fn peer_reader(name: String, table: Dict(String, Toml)) -> Reader {
   Reader(table:, context: "peer " <> name)
 }
 
-/// Load config from a TOML file. Only a genuinely absent file yields the
-/// defaults; unreadable or malformed config is an error, so a permission
-/// mishap cannot silently boot a daemon with zero sources.
+/// Load config from a TOML file, resolving its `import` list first. Only a
+/// genuinely absent root file yields the defaults; unreadable or malformed
+/// config is an error, so a permission mishap cannot silently boot a daemon
+/// with zero sources. An import named but missing is an error for the same
+/// reason: a boot without the tokens file would run every source without
+/// credentials.
 pub fn load(path: String) -> Result(Config, String) {
   case simplifile.read(path) {
-    Ok(raw) -> parse(raw)
+    Ok(raw) -> {
+      use toml <- result.try(parse_toml(raw, "config"))
+      use merged <- result.try(resolve_imports(toml, dirname(path)))
+      validate(merged)
+    }
     Error(simplifile.Enoent) -> parse("")
     Error(error) -> Error(path <> ": " <> simplifile.describe_error(error))
   }
 }
 
-/// Parse a TOML config document; exported for tests.
+/// Parse a single TOML config document without following imports (the key is
+/// still type-checked); exported for tests.
 pub fn parse(raw: String) -> Result(Config, String) {
-  use toml <- result.try(
-    tom.parse(raw) |> result.replace_error("config is not valid toml"),
-  )
+  use toml <- result.try(parse_toml(raw, "config"))
+  use _ <- result.try(import_paths(toml))
+  validate(dict.delete(toml, "import"))
+}
+
+fn parse_toml(
+  raw: String,
+  label: String,
+) -> Result(Dict(String, Toml), String) {
+  tom.parse(raw) |> result.replace_error(label <> " is not valid toml")
+}
+
+/// `import = ["tokens.toml"]`: each file is parsed and deep-merged into the
+/// root document, so secrets can live in a separate file with tighter
+/// permissions while `[sources.*]`/`[peers.*]` stay editable. Merging is
+/// additive only: a leaf key defined twice is an error, never a shadowing
+/// rule, and imports do not nest, so the config graph is one file plus its
+/// listed fragments.
+fn resolve_imports(
+  toml: Dict(String, Toml),
+  base_dir: String,
+) -> Result(Dict(String, Toml), String) {
+  use paths <- result.try(import_paths(toml))
+  list.try_fold(over: paths, from: dict.delete(toml, "import"), with: fn(
+    acc,
+    path,
+  ) {
+    let label = "config: import " <> path
+    use raw <- result.try(
+      simplifile.read(resolve_path(base_dir, path))
+      |> result.map_error(fn(error) {
+        label <> ": " <> simplifile.describe_error(error)
+      }),
+    )
+    use imported <- result.try(parse_toml(raw, label))
+    case dict.has_key(imported, "import") {
+      True -> Error(label <> ": imports do not nest")
+      False -> merge(acc, imported, at: [], file: path)
+    }
+  })
+}
+
+fn import_paths(toml: Dict(String, Toml)) -> Result(List(String), String) {
+  case tom.get_array(toml, ["import"]) {
+    Error(tom.NotFound(_)) -> Ok([])
+    Error(tom.WrongType(..)) ->
+      Error("config: 'import' should be an array of strings")
+    Ok(items) ->
+      list.try_map(items, fn(item) {
+        case item {
+          tom.String("") -> Error("config: 'import' contains an empty path")
+          tom.String(path) -> Ok(path)
+          _ -> Error("config: 'import' should be an array of strings")
+        }
+      })
+  }
+}
+
+fn merge(
+  base: Dict(String, Toml),
+  overlay: Dict(String, Toml),
+  at at: List(String),
+  file file: String,
+) -> Result(Dict(String, Toml), String) {
+  dict.fold(overlay, Ok(base), fn(acc, key, value) {
+    use acc <- result.try(acc)
+    case dict.get(acc, key), value {
+      Error(Nil), _ -> Ok(dict.insert(acc, key, value))
+      Ok(tom.Table(existing)), tom.Table(incoming)
+      | Ok(tom.Table(existing)), tom.InlineTable(incoming)
+      | Ok(tom.InlineTable(existing)), tom.Table(incoming)
+      | Ok(tom.InlineTable(existing)), tom.InlineTable(incoming)
+      ->
+        merge(existing, incoming, at: [key, ..at], file:)
+        |> result.map(fn(merged) { dict.insert(acc, key, tom.Table(merged)) })
+      Ok(_), _ ->
+        Error(
+          "config: import "
+          <> file
+          <> ": '"
+          <> { [key, ..at] |> list.reverse |> string.join(".") }
+          <> "' is already defined",
+        )
+    }
+  })
+}
+
+/// Absolute and `~/` paths stand alone; anything else is relative to the
+/// importing file's directory, so the config directory can move as a unit.
+fn resolve_path(base_dir: String, path: String) -> String {
+  case path, envoy.get("HOME") {
+    "/" <> _, _ -> path
+    "~/" <> rest, Ok(home) -> home <> "/" <> rest
+    _, _ -> base_dir <> "/" <> path
+  }
+}
+
+fn dirname(path: String) -> String {
+  case string.split(path, "/") |> list.reverse {
+    [_, ..parents] if parents != [] ->
+      parents |> list.reverse |> string.join("/")
+    _ -> "."
+  }
+}
+
+fn validate(toml: Dict(String, Toml)) -> Result(Config, String) {
   let root = Reader(table: toml, context: "config")
   use port <- result.try(optional_int(root, "port", 7333))
   // Loopback by default: the log is unauthenticated, so a bind address is an

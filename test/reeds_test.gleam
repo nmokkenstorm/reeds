@@ -591,6 +591,87 @@ pub fn config_parse_test() {
   ] = parsed.sources
 }
 
+fn write_config_dir(name: String, files: List(#(String, String))) -> String {
+  let base = "/tmp/reeds_test_" <> name
+  let _ = simplifile.delete(base)
+  let assert Ok(Nil) = simplifile.create_directory_all(base)
+  list.each(files, fn(file) {
+    let #(file_name, content) = file
+    let assert Ok(Nil) = simplifile.write(base <> "/" <> file_name, content)
+  })
+  base
+}
+
+pub fn config_import_merges_secrets_test() {
+  let base =
+    write_config_dir("import_merge", [
+      #(
+        "config.toml",
+        "import = [\"tokens.toml\"]\nport = 7444\n\n[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = [\"r\"]\n\n[peers.hub2]\nurl = \"http://hub2:7333\"\n",
+      ),
+      #(
+        "tokens.toml",
+        "[sources.work]\ntoken = \"sekrit\"\n\n[peers.hub2]\ntoken = \"peer-sekrit\"\n",
+      ),
+    ])
+  let assert Ok(parsed) = config.load(base <> "/config.toml")
+  assert parsed.port == 7444
+  let assert [spec] = parsed.sources
+  let assert Ok("sekrit") =
+    config.token(config.source_reader(spec.name, spec.table))
+  let assert [peer] = parsed.peers
+  assert peer.token == "peer-sekrit"
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+/// A key defined in both files is refused, not shadowed: which file wins is
+/// exactly the ambiguity the fail-fast policy exists to rule out.
+pub fn config_import_rejects_duplicate_key_test() {
+  let base =
+    write_config_dir("import_conflict", [
+      #(
+        "config.toml",
+        "import = [\"tokens.toml\"]\n\n[sources.work]\nkind = \"bitbucket\"\nworkspace = \"w\"\nrepos = [\"r\"]\ntoken = \"inline\"\n",
+      ),
+      #("tokens.toml", "[sources.work]\ntoken = \"imported\"\n"),
+    ])
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "sources.work.token")
+  assert string.contains(reason, "already defined")
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+pub fn config_import_missing_file_test() {
+  let base =
+    write_config_dir("import_missing", [
+      #("config.toml", "import = [\"tokens.toml\"]\n"),
+    ])
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "tokens.toml")
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+pub fn config_import_does_not_nest_test() {
+  let base =
+    write_config_dir("import_nested", [
+      #("config.toml", "import = [\"tokens.toml\"]\n"),
+      #("tokens.toml", "import = [\"more.toml\"]\n"),
+    ])
+  let assert Error(reason) = config.load(base <> "/config.toml")
+  assert string.contains(reason, "imports do not nest")
+  let assert Ok(Nil) = simplifile.delete(base)
+}
+
+pub fn config_parse_ignores_import_test() {
+  let assert Ok(parsed) = config.parse("import = [\"tokens.toml\"]\nport = 7444\n")
+  assert parsed.port == 7444
+}
+
+pub fn config_import_must_be_string_array_test() {
+  let assert Error(_) = config.parse("import = \"tokens.toml\"\n")
+  let assert Error(_) = config.parse("import = [7]\n")
+}
+
 pub fn config_source_enabled_test() {
   let cases = [#("enabled = false\n", False), #("enabled = true\n", True)]
   list.each(cases, fn(item) {
