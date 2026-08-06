@@ -65,6 +65,12 @@ whole segments: `bb.pr` matches `bb.pr.x` but not `bb.private`. `*` matches
 everything. The sequence is global across topics, so one cursor works for any
 prefix.
 
+Known topic families: `agents.<name>.*` (agent chatter), `bb.pr.<repo>.<id>`
+and `bb.pipe.<repo>.<build>` plus `gl.pipe.<repo>.<id>` (built-in pollers),
+`train.<id>.<step>` (the `train` merge-train CLI mirrors step marks there,
+closing the train out with kind `done` on `train.<id>`), and `reeds.meta`
+(network housekeeping).
+
 ## CLI
 
 ```sh
