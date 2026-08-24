@@ -219,6 +219,18 @@ pub fn store_roundtrip_test() {
 
   let assert Ok([]) =
     store.read_since(conn, prefix: "nope", since: 0, limit: 10)
+
+  // read_last takes from the head but keeps ascending order, so its last
+  // element's seq is a valid forward cursor.
+  let assert Ok([two_again, three]) =
+    store.read_last(conn, prefix: "*", limit: 2)
+  assert two_again.seq == 2
+  assert three.seq == 3
+
+  let assert Ok([a_latest]) = store.read_last(conn, prefix: "a", limit: 1)
+  assert a_latest.topic == "a.c"
+
+  let assert Ok([]) = store.read_last(conn, prefix: "nope", limit: 5)
 }
 
 /// Re-publishing a source fact with the same `(topic, idem)` no-ops rather
@@ -665,7 +677,8 @@ pub fn config_import_does_not_nest_test() {
 }
 
 pub fn config_parse_ignores_import_test() {
-  let assert Ok(parsed) = config.parse("import = [\"tokens.toml\"]\nport = 7444\n")
+  let assert Ok(parsed) =
+    config.parse("import = [\"tokens.toml\"]\nport = 7444\n")
   assert parsed.port == 7444
 }
 
@@ -1179,7 +1192,7 @@ pub fn hub_record_poll_whispers_transitions_test() {
   process.send(h, hub.SetRoster([health.Registration("gh", "github", True)]))
 
   let inbox = process.new_subject()
-  process.send(h, hub.Subscribe("reeds.source", 0, inbox))
+  process.send(h, hub.Subscribe("reeds.source", Some(0), inbox))
 
   let failing = [health.Unreachable("pr:a", "status 401")]
 
@@ -1252,7 +1265,7 @@ pub fn hub_publish_subscribe_test() {
     ))
 
   let inbox = process.new_subject()
-  process.send(h, hub.Subscribe("bb.pr", 0, inbox))
+  process.send(h, hub.Subscribe("bb.pr", Some(0), inbox))
 
   let assert Ok(replayed) = process.receive(inbox, 1000)
   assert replayed.seq == 1
@@ -1297,6 +1310,40 @@ pub fn hub_peer_cursor_test() {
     process.call(h, waiting: 1000, sending: hub.GetPeerCursor("hub2", _))
 }
 
+/// A `since: None` subscribe skips replay entirely and only sees whispers
+/// published after it.
+pub fn hub_subscribe_from_head_test() {
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
+  let assert Ok(started) = hub.start(conn, "hub1")
+  let h = started.data
+
+  let assert Ok(1) =
+    process.call(h, waiting: 1000, sending: hub.Publish(
+      "a.old",
+      "t",
+      "note",
+      "{}",
+      None,
+      _,
+    ))
+
+  let inbox = process.new_subject()
+  process.send(h, hub.Subscribe("*", None, inbox))
+  let assert Error(_) = process.receive(inbox, 100)
+
+  let assert Ok(2) =
+    process.call(h, waiting: 1000, sending: hub.Publish(
+      "a.new",
+      "t",
+      "note",
+      "{}",
+      None,
+      _,
+    ))
+  let assert Ok(live) = process.receive(inbox, 1000)
+  assert live.topic == "a.new"
+}
+
 /// Foreign ingest preserves origin/origin_seq/idem verbatim, fans out to
 /// subscribers with a freshly assigned local seq, and a re-ingested batch
 /// (as a resumed pull would send) counts zero new rows without erroring.
@@ -1306,7 +1353,7 @@ pub fn hub_ingest_foreign_test() {
   let h = started.data
 
   let inbox = process.new_subject()
-  process.send(h, hub.Subscribe("*", 0, inbox))
+  process.send(h, hub.Subscribe("*", Some(0), inbox))
 
   let foreign =
     Whisper(
@@ -1386,7 +1433,7 @@ pub fn peer_pull_converges_and_never_round_trips_test() {
     ))
 
   let inbox2 = process.new_subject()
-  process.send(hub2, hub.Subscribe("*", 0, inbox2))
+  process.send(hub2, hub.Subscribe("*", Some(0), inbox2))
 
   // hub2 pulls from hub1: a fresh actor ticks once immediately on start.
   let assert Ok(started1) = peer.start(pull_peer("hub1", port1), hub2)
@@ -1436,7 +1483,11 @@ pub fn peer_pull_converges_and_never_round_trips_test() {
   assert list.length(hub1_rows) == 2
 }
 
-fn push_peer(name: String, port: Int, mode: config.PeerMode) -> config.PeerSpec {
+fn push_peer(
+  name: String,
+  port: Int,
+  mode: config.PeerMode,
+) -> config.PeerSpec {
   config.PeerSpec(
     name:,
     url: "http://127.0.0.1:" <> int.to_string(port),
@@ -1494,7 +1545,11 @@ pub fn wire_since_response_roundtrip_test() {
   let assert Ok(#(parsed, 4, True)) = wire.parse_since_response(text)
   assert parsed == whispers
   let assert Ok(#([], 0, False)) =
-    wire.parse_since_response(wire.since_response([], next_since: 0, more: False))
+    wire.parse_since_response(wire.since_response(
+      [],
+      next_since: 0,
+      more: False,
+    ))
 }
 
 /// The push half of Phase 4's done-criteria over a real HTTP round trip: a
@@ -1508,7 +1563,7 @@ pub fn peer_push_converges_and_resumes_test() {
   let assert Ok(1) = publish(hub1, "agents.turtle", 1)
 
   let inbox2 = process.new_subject()
-  process.send(hub2, hub.Subscribe("*", 0, inbox2))
+  process.send(hub2, hub.Subscribe("*", Some(0), inbox2))
 
   let assert Ok(_) = peer.start(push_peer("hub2", port2, config.Push), hub1)
 
@@ -1612,9 +1667,10 @@ pub fn peer_chunk_respects_budget_test() {
   // Second whisper would cross the budget: prefix only.
   assert peer.chunk([small, w(2, "{}"), w(3, "{}")], one_size + 1) == [small]
   // Over budget on its own: still taken, alone.
-  assert peer.chunk([w(1, "{\"big\":\"payload\"}")], 1) == [
-    w(1, "{\"big\":\"payload\"}"),
-  ]
+  assert peer.chunk([w(1, "{\"big\":\"payload\"}")], 1)
+    == [
+      w(1, "{\"big\":\"payload\"}"),
+    ]
 }
 
 /// A `both`-mode peer converges in both directions through one outbound
@@ -1630,9 +1686,9 @@ pub fn peer_both_mode_converges_bidirectionally_test() {
   // Both logs already hold their own seq 1; subscribing from 1 skips the
   // replay so the first delivery on each inbox is the synced foreign whisper.
   let inbox1 = process.new_subject()
-  process.send(hub1, hub.Subscribe("*", 1, inbox1))
+  process.send(hub1, hub.Subscribe("*", Some(1), inbox1))
   let inbox2 = process.new_subject()
-  process.send(hub2, hub.Subscribe("*", 1, inbox2))
+  process.send(hub2, hub.Subscribe("*", Some(1), inbox2))
 
   let assert Ok(_) = peer.start(push_peer("hub2", port2, config.Both), hub1)
 

@@ -38,8 +38,8 @@ peer token once you do.
 | Route                    | Effect                                                                                                                                               |
 | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /t/:topic`         | Publish JSON body. Returns `{"seq": n}`.                                                                                                             |
-| `GET /t/:prefix?since=N` | Whispers after seq N under prefix. Returns `next_since`.                                                                                             |
-| `GET /t/:prefix/events`  | SSE tail; `?since=N` or `Last-Event-ID` to resume.                                                                                                   |
+| `GET /t/:prefix?since=N` | Whispers after seq N under prefix. Returns `next_since`. `?last=N` instead reads the newest N; its `next_since` seeds a cursor pull.                 |
+| `GET /t/:prefix/events`  | SSE tail; `?since=N` or `Last-Event-ID` to resume. No cursor = live from the head.                                                                   |
 | `POST /ingest`           | Peer push: body is a `GET /t/*?since=N` response. Same wire shape, no second format. Returns `{"accepted": n, "cursors": {origin: max_origin_seq}}`. |
 | `GET /health`            | Per-source health. `ok` is false when any source is down.                                                                                            |
 | `GET /state?prefix=P`    | Latest whisper per topic under `P`, tombstones dropped.                                                                                              |
@@ -75,8 +75,9 @@ closing the train out with kind `done` on `train.<id>`), and `reeds.meta`
 
 ```sh
 bin/reeds pub agents.review.api '{"verdict":"carry on"}' review.done
-bin/reeds since agents 0
-bin/reeds tail            # firehose
+bin/reeds since agents    # newest 200; add a seq to page forward from it
+bin/reeds last train 50   # newest 50 under a prefix
+bin/reeds tail            # firehose, live from now
 bin/reeds health          # per-source table; --json for the raw body
 bin/reeds-watch           # refreshing table for a tmux status pane
 ```

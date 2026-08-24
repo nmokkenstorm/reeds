@@ -19,15 +19,29 @@ case "$cmd" in
     echo
     ;;
   since)
+    # Bare form reads the newest page; an explicit seq is a cursor pull.
     prefix="$1"
-    since="${2:-0}"
-    curl -sf "$REEDS_URL/t/$prefix?since=$since"
+    if [ "$#" -ge 2 ]; then
+      curl -sf "$REEDS_URL/t/$prefix?since=$2"
+    else
+      curl -sf "$REEDS_URL/t/$prefix?last=200"
+    fi
+    echo
+    ;;
+  last)
+    prefix="${1:-*}"
+    n="${2:-200}"
+    curl -sf "$REEDS_URL/t/$prefix?last=$n"
     echo
     ;;
   tail)
+    # Bare form tails live from the head; an explicit seq replays from there.
     prefix="${1:-*}"
-    since="${2:-0}"
-    curl -sfN "$REEDS_URL/t/$prefix/events?since=$since"
+    if [ "$#" -ge 2 ]; then
+      curl -sfN "$REEDS_URL/t/$prefix/events?since=$2"
+    else
+      curl -sfN "$REEDS_URL/t/$prefix/events"
+    fi
     ;;
   health)
     raw="$(curl -sf "$REEDS_URL/health")" || {
@@ -77,8 +91,9 @@ case "$cmd" in
     cat <<'EOF'
 usage:
   reeds pub <topic> <json> [kind]     publish a whisper
-  reeds since <prefix> [seq]          fetch whispers after seq (cursor pull)
-  reeds tail [prefix] [seq]           live SSE tail (default: everything)
+  reeds since <prefix> [seq]          whispers after seq; no seq = newest 200
+  reeds last [prefix] [n]             newest n whispers (default */200)
+  reeds tail [prefix] [seq]           live SSE tail; no seq = from now
   reeds health [--json]               per-source health; exit 1 if any down
 env: REEDS_URL (default http://localhost:7333), REEDS_SENDER (default whoami)
 EOF

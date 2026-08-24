@@ -146,40 +146,67 @@ fn publish(
   }
 }
 
+/// `?last=N` wins over `?since=N`: it reads the newest page instead of
+/// paging forward from a cursor. Its `next_since` is the head seq, so a
+/// caller can seed a cursor pull from it.
 fn read_since(
   hub: Subject(hub.Msg),
   req: Request(Connection),
   prefix: String,
 ) -> Response(ResponseData) {
-  let since = query_int(req, "since", 0)
-  let limit = int.clamp(query_int(req, "limit", 200), min: 1, max: max_page)
-  case
-    process.call(hub, waiting: 5000, sending: hub.ReadSince(
-      prefix,
-      since,
-      limit,
-      _,
-    ))
-  {
-    Error(reason) -> error_response(500, reason)
-    Ok(whispers) -> {
-      let next =
-        whispers
-        |> list.last
-        |> result.map(fn(w) { w.seq })
-        |> result.unwrap(since)
-      json_response(
-        200,
-        "{\"whispers\":"
-          <> whisper.list_to_json_string(whispers)
-          <> ",\"next_since\":"
-          <> int.to_string(next)
-          <> ",\"more\":"
-          <> more_json(list.length(whispers) == limit)
-          <> "}",
-      )
+  case query_opt_int(req, "last") {
+    Ok(last) -> {
+      let limit = int.clamp(last, min: 1, max: max_page)
+      case
+        process.call(hub, waiting: 5000, sending: hub.ReadLast(prefix, limit, _))
+      {
+        Error(reason) -> error_response(500, reason)
+        Ok(whispers) -> page_response(whispers, fallback: 0, more: False)
+      }
+    }
+    Error(_) -> {
+      let since = query_int(req, "since", 0)
+      let limit = int.clamp(query_int(req, "limit", 200), min: 1, max: max_page)
+      case
+        process.call(hub, waiting: 5000, sending: hub.ReadSince(
+          prefix,
+          since,
+          limit,
+          _,
+        ))
+      {
+        Error(reason) -> error_response(500, reason)
+        Ok(whispers) ->
+          page_response(
+            whispers,
+            fallback: since,
+            more: list.length(whispers) == limit,
+          )
+      }
     }
   }
+}
+
+fn page_response(
+  whispers: List(Whisper),
+  fallback fallback: Int,
+  more more: Bool,
+) -> Response(ResponseData) {
+  let next =
+    whispers
+    |> list.last
+    |> result.map(fn(w) { w.seq })
+    |> result.unwrap(fallback)
+  json_response(
+    200,
+    "{\"whispers\":"
+      <> whisper.list_to_json_string(whispers)
+      <> ",\"next_since\":"
+      <> int.to_string(next)
+      <> ",\"more\":"
+      <> more_json(more)
+      <> "}",
+  )
 }
 
 /// Receiving side of a peer push: body is a `/t/*?since=N` response verbatim
@@ -266,9 +293,12 @@ fn sse(
   req: Request(Connection),
   prefix: String,
 ) -> Response(ResponseData) {
+  // No cursor at all means a live tail from the head; replaying the full
+  // history on a bare subscribe was only ever a footgun. An explicit
+  // `since=0` still replays everything.
   let since = case request.get_header(req, "last-event-id") {
-    Ok(id) -> int.parse(id) |> result.unwrap(0)
-    Error(_) -> query_int(req, "since", 0)
+    Ok(id) -> int.parse(id) |> option.from_result
+    Error(_) -> query_opt_int(req, "since") |> option.from_result
   }
   mist.server_sent_events(
     request: req,
@@ -291,11 +321,15 @@ fn sse(
   )
 }
 
-fn query_int(req: Request(Connection), name: String, default: Int) -> Int {
+fn query_opt_int(req: Request(Connection), name: String) -> Result(Int, Nil) {
   request.get_query(req)
   |> result.unwrap([])
   |> list.key_find(name)
   |> result.try(int.parse)
+}
+
+fn query_int(req: Request(Connection), name: String, default: Int) -> Int {
+  query_opt_int(req, name)
   |> result.unwrap(default)
 }
 

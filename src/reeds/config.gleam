@@ -110,7 +110,8 @@ fn resolve_imports(
 ) -> Result(Dict(String, Toml), String) {
   use paths <- result.try(import_paths(toml))
   let root = dict.delete(toml, "import")
-  let seen = index_leaves(root, at: [], label: "the root config", into: dict.new())
+  let seen =
+    index_leaves(root, at: [], label: "the root config", into: dict.new())
   list.try_fold(over: paths, from: #(root, seen), with: fn(state, path) {
     let #(acc, seen) = state
     let label = "config: import " <> path

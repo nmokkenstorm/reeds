@@ -152,7 +152,9 @@ fn run_pull(state: State) -> health.FeedOutcome {
     Ok(#(whispers, next_cursor)) ->
       case ingest(state, whispers) {
         Error(reason) -> {
-          io.println("reeds: peer " <> peer.name <> " ingest failed: " <> reason)
+          io.println(
+            "reeds: peer " <> peer.name <> " ingest failed: " <> reason,
+          )
           health.Unreachable("pull", "local ingest failed: " <> reason)
         }
         Ok(_) -> {
@@ -178,8 +180,7 @@ fn run_push(state: State) -> health.FeedOutcome {
       _,
     ))
   {
-    Error(reason) ->
-      health.Unreachable("push", "local read failed: " <> reason)
+    Error(reason) -> health.Unreachable("push", "local read failed: " <> reason)
     Ok(whispers) -> {
       let batch = chunk(whispers, push_body_budget)
       let more =
@@ -191,10 +192,10 @@ fn run_push(state: State) -> health.FeedOutcome {
           health.Unreachable("push", reason)
         }
         Ok(next_cursor) -> {
-          process.send(state.hub, hub.PutPeerCursor(
-            push_cursor_key(peer),
-            next_cursor,
-          ))
+          process.send(
+            state.hub,
+            hub.PutPeerCursor(push_cursor_key(peer), next_cursor),
+          )
           health.Reached("push")
         }
       }

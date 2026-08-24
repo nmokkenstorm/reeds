@@ -22,10 +22,18 @@ pub type Msg {
     idem: Option(String),
     reply: Subject(Result(Int, String)),
   )
-  Subscribe(prefix: String, since: Int, subscriber: Subject(Whisper))
+  /// `since: None` skips replay entirely: the subscriber starts at the live
+  /// head instead of catching up from a cursor.
+  Subscribe(prefix: String, since: Option(Int), subscriber: Subject(Whisper))
   ReadSince(
     prefix: String,
     since: Int,
+    limit: Int,
+    reply: Subject(Result(List(Whisper), String)),
+  )
+  /// The newest `limit` whispers under `prefix`, oldest-first.
+  ReadLast(
+    prefix: String,
     limit: Int,
     reply: Subject(Result(List(Whisper), String)),
   )
@@ -97,6 +105,12 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
       subscribe(state, prefix, since, subscriber)
     ReadSince(prefix, since, limit, reply) -> {
       store.read_since(state.conn, prefix:, since:, limit:)
+      |> result.map_error(store.describe)
+      |> process.send(reply, _)
+      actor.continue(state)
+    }
+    ReadLast(prefix, limit, reply) -> {
+      store.read_last(state.conn, prefix:, limit:)
       |> result.map_error(store.describe)
       |> process.send(reply, _)
       actor.continue(state)
@@ -330,10 +344,13 @@ fn ingest_foreign(
 fn subscribe(
   state: State,
   prefix: String,
-  since: Int,
+  since: Option(Int),
   subscriber: Subject(Whisper),
 ) -> actor.Next(State, Msg) {
-  replay(state.conn, prefix, since, subscriber)
+  case since {
+    None -> Nil
+    Some(cursor) -> replay(state.conn, prefix, cursor, subscriber)
+  }
   case process.subject_owner(subscriber) {
     Error(_) -> actor.continue(state)
     Ok(pid) ->

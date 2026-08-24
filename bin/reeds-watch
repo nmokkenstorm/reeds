@@ -16,11 +16,18 @@ status="[....]"
 bold="$(tput bold)" dim="$(tput dim)" reset="$(tput sgr0)"
 green="$(tput setaf 2)" red="$(tput setaf 1)" cyan="$(tput setaf 6)" yellow="$(tput setaf 3)"
 
+# First fetch seeds the cursor from the newest page instead of paginating
+# the whole log from seq 0 just to throw away everything but the backlog.
 fetch() {
-  local resp more
+  local resp more query
   : > "$new"
   while :; do
-    resp="$(curl -sf --max-time 3 "$REEDS_URL/t/$PREFIX?since=$cursor&limit=500")" || return 1
+    if [ "$cursor" = 0 ]; then
+      query="last=$BACKLOG"
+    else
+      query="since=$cursor&limit=500"
+    fi
+    resp="$(curl -sf --max-time 3 "$REEDS_URL/t/$PREFIX?$query")" || return 1
     jq -r '.whispers[] | [.seq, (.ts/1000 | floor), .sender, .kind, .topic, (.body | tojson)] | @tsv' \
       <<<"$resp" >> "$new"
     cursor="$(jq -r '.next_since' <<<"$resp")"

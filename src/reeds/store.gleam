@@ -310,6 +310,35 @@ pub fn read_since(
   }
 }
 
+/// Newest `limit` whispers under `prefix`, returned oldest-first so the
+/// shape matches `read_since` and the last seq still works as a forward
+/// cursor.
+pub fn read_last(
+  conn: Connection,
+  prefix prefix: String,
+  limit limit: Int,
+) -> Result(List(Whisper), Error) {
+  case prefix {
+    "*" ->
+      sqlight.query(
+        select_whispers <> " order by seq desc limit ?1",
+        on: conn,
+        with: [sqlight.int(limit)],
+        expecting: whisper_decoder(),
+      )
+    _ ->
+      sqlight.query(
+        select_whispers
+          <> " where (topic = ?1 or substr(topic, 1, length(?1) + 1) = ?1 || '.')
+         order by seq desc limit ?2",
+        on: conn,
+        with: [sqlight.text(prefix), sqlight.int(limit)],
+        expecting: whisper_decoder(),
+      )
+  }
+  |> result.map(list.reverse)
+}
+
 fn entry_decoder(has_origin has_origin: Bool) -> decode.Decoder(Entry) {
   use topic <- decode.field(0, decode.string)
   use ts <- decode.field(1, decode.int)
