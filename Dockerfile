@@ -1,7 +1,7 @@
 # esqlite is a NIF, so the build stage needs a C toolchain and the runtime
 # stage must share the build stage's libc. Both are Alpine/musl for that reason:
 # swapping either base for a glibc image breaks the compiled .so at load time.
-FROM ghcr.io/gleam-lang/gleam:v1.17.0-erlang-alpine AS build
+FROM ghcr.io/gleam-lang/gleam:v1.18.1-erlang-alpine AS build
 
 RUN apk add --no-cache build-base
 

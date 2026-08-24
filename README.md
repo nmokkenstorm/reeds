@@ -8,7 +8,7 @@ Named for the reeds that whispered King Midas's secret.
 
 ## Install
 
-Needs Erlang/OTP 29 and Gleam 1.17 to build. Nothing but Erlang to run.
+Needs Erlang/OTP 29 and Gleam 1.18 to build. Nothing but Erlang to run.
 
 From a checkout:
 
