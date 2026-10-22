@@ -92,3 +92,4 @@ down, so it works as a real check rather than a liveness ping.
 - [docs/sources.md](docs/sources.md): poll sources, config, health, backoff, new providers
 - [docs/mesh.md](docs/mesh.md): mesh topology and state view spec
 - [docs/design.md](docs/design.md): design notes and supervision
+- [docs/backup.md](docs/backup.md): daily snapshot to an external volume, restore, retention

@@ -19,7 +19,7 @@ shipment="${REEDS_SHIPMENT:-}"
 
 cp -R "$shipment" "$release.tmp"
 cp "$repo/bin/reeds" "$release.tmp/reeds-cli"
-cp "$repo/bin/reeds-watchdog" "$release.tmp/"
+cp "$repo/bin/reeds-watchdog" "$repo/bin/reeds-backup" "$release.tmp/"
 mv "$release.tmp" "$release"
 
 [ -L "$INSTALL" ] || [ ! -e "$INSTALL" ] || mv "$INSTALL" "$INSTALL.legacy"

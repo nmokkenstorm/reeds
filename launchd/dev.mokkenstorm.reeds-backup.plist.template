@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.mokkenstorm.reeds-backup</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec "$(/usr/bin/readlink -f "$0")/reeds-backup"</string>
+    <string>@INSTALL@</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>@PATH@</string>
+    <key>HOME</key>
+    <string>@HOME@</string>
+    <key>REEDS_CONFIG</key>
+    <string>@HOME@/.config/reeds/config.toml</string>
+    <key>REEDS_BACKUP_CONFIG</key>
+    <string>@HOME@/.config/reeds/backup.env</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>@HOUR@</integer>
+    <key>Minute</key>
+    <integer>@MINUTE@</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>@HOME@/Library/Logs/reeds-backup.log</string>
+  <key>StandardErrorPath</key>
+  <string>@HOME@/Library/Logs/reeds-backup.log</string>
+</dict>
+</plist>
