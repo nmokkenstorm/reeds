@@ -3,7 +3,6 @@ import gleam/http
 import gleam/http/request
 import gleam/httpc
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
@@ -226,7 +225,7 @@ fn try_local(
     Ok(reply) -> next(reply)
     Error(failure) -> {
       let reason = hub_call.describe(failure)
-      io.println("reeds: peer " <> state.peer.name <> ": " <> reason)
+      logs.warning("reeds: peer " <> state.peer.name <> ": " <> reason)
       health.Unreachable(feed, "local " <> reason)
     }
   }
@@ -287,7 +286,7 @@ fn record_poll(state: State, outcomes: List(health.FeedOutcome)) -> Nil {
   case recorded {
     Ok(_) -> Nil
     Error(failure) ->
-      io.println(
+      logs.warning(
         "reeds: peer " <> state.peer.name <> ": " <> hub_call.describe(failure),
       )
   }

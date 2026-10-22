@@ -1,9 +1,9 @@
 import gleam/erlang/process.{type Pid, type Subject}
 import gleam/int
-import gleam/io
 import gleam/result
 import reeds/clock
 import reeds/hub
+import reeds/logs
 
 pub const default_timeout_ms = 5000
 
@@ -95,7 +95,7 @@ fn log(what: String, elapsed: Int, hub: Subject(hub.Msg)) -> Nil {
     |> result.try(mailbox_len)
     |> result.map(int.to_string)
     |> result.unwrap("unknown")
-  io.println(
+  logs.warning(
     "reeds: "
     <> what
     <> " after "
