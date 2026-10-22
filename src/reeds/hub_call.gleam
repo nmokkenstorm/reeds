@@ -43,7 +43,7 @@ pub fn call(
   let selector =
     process.new_selector()
     |> process.select(result)
-    |> process.select_monitors(fn(_down) { Error(Nil) })
+    |> process.select_specific_monitor(monitor, fn(_down) { Error(Nil) })
   let outcome =
     process.selector_receive(selector, timeout_ms + helper_grace_ms)
     |> result.unwrap(Error(Nil))

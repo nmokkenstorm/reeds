@@ -2001,6 +2001,27 @@ pub fn hub_call_leaves_no_late_reply_in_the_caller_mailbox_test() {
   assert after == before
 }
 
+pub fn hub_call_leaves_unrelated_monitors_alone_test() {
+  let ready = process.new_subject()
+  process.spawn(fn() {
+    let inbox = process.new_subject()
+    process.send(ready, inbox)
+    let assert hub.Health(reply) = process.receive_forever(inbox)
+    process.sleep(150)
+    process.send(reply, Ok([]))
+  })
+  let assert Ok(slow_hub) = process.receive(ready, 1000)
+  let victim = process.spawn_unlinked(fn() { process.sleep(30) })
+  let monitor = process.monitor(victim)
+
+  let assert Ok(Ok([])) = hub_call.call(slow_hub, 2000, "Health", hub.Health)
+
+  let assert Ok(Nil) =
+    process.new_selector()
+    |> process.select_specific_monitor(monitor, fn(_down) { Nil })
+    |> process.selector_receive(0)
+}
+
 pub fn hub_call_returns_a_prompt_reply_test() {
   let #(h, _port) = start_bridge("hub1")
   let assert Ok(Ok(_)) = hub_call.call(h, 1000, "Health", hub.Health)
