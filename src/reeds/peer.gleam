@@ -15,6 +15,7 @@ import reeds/config.{type PeerSpec}
 import reeds/health
 import reeds/hub
 import reeds/hub_call
+import reeds/logs
 import reeds/sources/poller
 import reeds/whisper.{type Whisper}
 import reeds/wire
@@ -155,13 +156,13 @@ fn run_pull(state: State) -> health.FeedOutcome {
   ))
   case pull(peer, cursor) {
     Error(reason) -> {
-      io.println("reeds: peer " <> peer.name <> " pull failed: " <> reason)
+      logs.warning("reeds: peer " <> peer.name <> " pull failed: " <> reason)
       health.Unreachable("pull", reason)
     }
     Ok(#(whispers, next_cursor)) ->
       case ingest(state, whispers) {
         Error(reason) -> {
-          io.println(
+          logs.warning(
             "reeds: peer " <> peer.name <> " ingest failed: " <> reason,
           )
           health.Unreachable("pull", "local ingest failed: " <> reason)
@@ -195,7 +196,9 @@ fn run_push(state: State) -> health.FeedOutcome {
         || list.length(batch) < list.length(whispers)
       case push(peer, batch, cursor, more) {
         Error(reason) -> {
-          io.println("reeds: peer " <> peer.name <> " push failed: " <> reason)
+          logs.warning(
+            "reeds: peer " <> peer.name <> " push failed: " <> reason,
+          )
           health.Unreachable("push", reason)
         }
         Ok(next_cursor) -> {

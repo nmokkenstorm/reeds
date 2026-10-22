@@ -15,7 +15,21 @@ PUBLISH_CMD="${REEDS_WATCHDOG_PUBLISH_CMD:-$CLI pub}"
 STATE="$STATE_DIR/watchdog.state"
 export REEDS_SENDER="${REEDS_SENDER:-watchdog}"
 
-log() { printf '%s reeds-watchdog: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
+LOG_FILE="${REEDS_WATCHDOG_LOG:-}"
+LOG_MAX="${REEDS_WATCHDOG_LOG_MAX:-1048576}"
+
+# One kept generation: a probe is a fresh process, so no descriptor outlives a rename.
+rotate() {
+  [ -f "$LOG_FILE" ] || return 0
+  [ "$(wc -c <"$LOG_FILE")" -lt "$LOG_MAX" ] || mv -f "$LOG_FILE" "$LOG_FILE.1"
+}
+
+log() {
+  line="$(printf '%s reeds-watchdog: %s' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*")"
+  [ -n "$LOG_FILE" ] || { echo "$line"; return 0; }
+  rotate
+  echo "$line" >>"$LOG_FILE"
+}
 
 field() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -n 1 || true; }
 

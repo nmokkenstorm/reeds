@@ -1,3 +1,0 @@
-# logfilename                          [owner:group]  mode count size(KB) when flags
-@HOME@/Library/Logs/reeds.log          @USER@:staff   644  5     10240    *    JN
-@HOME@/Library/Logs/reeds-watchdog.log @USER@:staff   644  3     1024     *    JN

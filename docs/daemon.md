@@ -41,26 +41,30 @@ launchctl kickstart -k gui/$(id -u)/dev.mokkenstorm.reeds   # restart
 `dirname` of `command -v erl`. To reuse an existing database, point `DB` at it
 (stop the daemon before moving one, and move `-wal` and `-shm` along).
 
-### Log rotation
+### Logs
 
-The agent starts the daemon through `reeds-run`, which appends every output line
-with a fresh open instead of holding a descriptor. newsyslog renames the log, so
-a daemon holding the old descriptor would keep writing into the rotated (then
-compressed and unlinked) file and the live log would go silent.
+The daemon logs through OTP `logger`: app lines, crash reports and supervisor
+reports all land in `REEDS_LOG` (`~/Library/Logs/reeds.log` in the plist) via a
+`logger_std_h` file handler that rotates itself, so there is no pipe, no
+wrapper process and no root step. `src/reeds/logs.gleam` installs the handler
+when `main` starts; with `REEDS_LOG` unset the stdout default stays, which is
+what `gleam run` wants.
 
-`launchd/reeds.newsyslog.conf.template` rotates `reeds.log` at 10 MB and keeps
-five bzip2-compressed generations; the watchdog log rotates at 1 MB and keeps
-three. Installing needs root:
+| Variable              | Default             |
+| --------------------- | ------------------- |
+| `REEDS_LOG`           | unset (stdout)      |
+| `REEDS_LOG_MAX_BYTES` | `10485760` (10 MiB) |
+| `REEDS_LOG_MAX_FILES` | `5`                 |
 
-```sh
-sed -e "s|@HOME@|$HOME|g" -e "s|@USER@|$USER|g" \
-  launchd/reeds.newsyslog.conf.template \
-  | sudo tee /etc/newsyslog.d/reeds.conf >/dev/null
-sudo newsyslog -nv -f /etc/newsyslog.d/reeds.conf   # dry run
-```
+Rotated generations are `reeds.log.0.gz` (newest) through `reeds.log.4.gz`.
+Logging is asynchronous and drops lines past a 2000 message queue rather than
+blocking the daemon. If the log file cannot be opened the daemon says so and
+stays on stdout.
 
-macOS runs newsyslog hourly, so rotation lands within the hour after the size
-is crossed.
+launchd's `StandardOutPath` and `StandardErrorPath` point at
+`~/Library/Logs/reeds.stdout.log`, which stays near-empty: mist prints one
+`Listening on ...` line per boot, and anything the VM writes before `main`
+runs or after the handler is gone (boot failures, `erl` errors) lands there.
 
 ### Watchdog
 
@@ -69,7 +73,7 @@ agent runs `reeds-watchdog` every 60 seconds: it probes `/health` with a 3 secon
 timeout and counts consecutive failures in `~/.local/state/reeds/watchdog.state`.
 At 3 it runs `launchctl kickstart -k` on the daemon, then refuses to restart
 again for 10 minutes so a slow boot is not killed. Each restart is logged to
-`~/Library/Logs/reeds-watchdog.log`, and once `/health` answers again it
+`~/Library/Logs/reeds-watchdog.log` (capped at 1 MiB, one `.1` generation kept), and once `/health` answers again it
 publishes one whisper on `reeds.meta`.
 
 ```sh
@@ -92,6 +96,8 @@ Every knob is an environment variable, set in the plist when you need it:
 | `REEDS_WATCHDOG_STATE_DIR`   | `~/.local/state/reeds`                                   |
 | `REEDS_WATCHDOG_RESTART_CMD` | `launchctl kickstart -k gui/<uid>/dev.mokkenstorm.reeds` |
 | `REEDS_WATCHDOG_PUBLISH_CMD` | `reeds-cli pub` (called with topic, body, kind)          |
+| `REEDS_WATCHDOG_LOG`         | unset (stdout); the plist sets the log path              |
+| `REEDS_WATCHDOG_LOG_MAX`     | `1048576` (bytes)                                        |
 
 `test/watchdog_test.sh` runs it against a closed port with a stubbed restart:
 one restart after three misses, none inside the cooldown, a counter that resets

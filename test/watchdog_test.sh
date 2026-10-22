@@ -55,5 +55,11 @@ kill "$server"; wait "$server" 2>/dev/null || true
 probe; probe
 expect "counter restarts from zero after a success" "$(count restarts)" 2
 
+export REEDS_WATCHDOG_LOG="$work/wd.log" REEDS_WATCHDOG_LOG_MAX=200
+for _ in 1 2 3 4 5 6 7 8; do probe; done
+expect "log rotated to one kept generation" "$([ -f "$work/wd.log.1" ] && echo yes || echo no)" yes
+expect "no second generation" "$([ -f "$work/wd.log.2" ] && echo yes || echo no)" no
+expect "live log stays under the cap plus one line" "$([ "$(wc -c <"$work/wd.log")" -lt 400 ] && echo yes || echo no)" yes
+
 [ "$failures" = 0 ] && echo "watchdog: all assertions passed"
 exit "$failures"

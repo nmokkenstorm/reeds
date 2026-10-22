@@ -14,7 +14,7 @@ mkdir -p "$(dirname "$INSTALL")"
 
 cp -R "$repo/build/erlang-shipment" "$release.tmp"
 cp "$repo/bin/reeds" "$release.tmp/reeds-cli"
-cp "$repo/bin/reeds-run" "$repo/bin/reeds-watchdog" "$release.tmp/"
+cp "$repo/bin/reeds-watchdog" "$release.tmp/"
 mv "$release.tmp" "$release"
 
 [ -L "$INSTALL" ] || [ ! -e "$INSTALL" ] || mv "$INSTALL" "$INSTALL.legacy"

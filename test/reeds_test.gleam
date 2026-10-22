@@ -1,4 +1,6 @@
+import gleam/dynamic.{type Dynamic}
 import gleam/dynamic/decode
+import gleam/erlang/atom
 import gleam/erlang/process
 import gleam/http
 import gleam/http/request
@@ -7,6 +9,7 @@ import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 import gleam/string
 import gleeunit
 import mist
@@ -16,6 +19,7 @@ import reeds/health
 import reeds/host
 import reeds/hub
 import reeds/hub_call
+import reeds/logs
 import reeds/peer
 import reeds/source
 import reeds/sources/bitbucket
@@ -2106,4 +2110,72 @@ pub fn store_sets_a_busy_timeout_test() {
       expecting: decode.field(0, decode.int, decode.success),
     )
   assert timeout == 3000
+}
+
+fn config_at(key: String) {
+  [atom.create("config"), atom.create(key)]
+}
+
+fn charlist(text: String) -> List(Int) {
+  text |> string.to_utf_codepoints |> list.map(string.utf_codepoint_to_int)
+}
+
+pub fn log_handler_config_test() {
+  let decoder = {
+    use file <- decode.subfield(config_at("file"), decode.list(decode.int))
+    use max_bytes <- decode.subfield(config_at("max_no_bytes"), decode.int)
+    use max_files <- decode.subfield(config_at("max_no_files"), decode.int)
+    use compress <- decode.subfield(
+      config_at("compress_on_rotate"),
+      decode.bool,
+    )
+    use sync <- decode.subfield(config_at("sync_mode_qlen"), decode.int)
+    use drop <- decode.subfield(config_at("drop_mode_qlen"), decode.int)
+    use flush <- decode.subfield(config_at("flush_qlen"), decode.int)
+    decode.success(#(file, max_bytes, max_files, compress, sync, drop, flush))
+  }
+  assert decode.run(logs.handler_config("/tmp/reeds.log", 1024, 3), decoder)
+    == Ok(#(charlist("/tmp/reeds.log"), 1024, 3, True, 2000, 2000, 5000))
+}
+
+pub fn log_settings_test() {
+  let env = fn(pairs) { fn(key) { list.key_find(pairs, key) } }
+
+  assert logs.settings(env([])) == None
+  assert logs.settings(env([#("REEDS_LOG", "")])) == None
+  assert logs.settings(env([#("REEDS_LOG", "/x.log")]))
+    == Some(logs.Settings("/x.log", 10_485_760, 5))
+  assert logs.settings(
+      env([
+        #("REEDS_LOG", "/x.log"),
+        #("REEDS_LOG_MAX_BYTES", "2048"),
+        #("REEDS_LOG_MAX_FILES", "9"),
+      ]),
+    )
+    == Some(logs.Settings("/x.log", 2048, 9))
+  assert logs.settings(
+      env([
+        #("REEDS_LOG", "/x.log"),
+        #("REEDS_LOG_MAX_BYTES", "nope"),
+        #("REEDS_LOG_MAX_FILES", "0"),
+      ]),
+    )
+    == Some(logs.Settings("/x.log", 10_485_760, 5))
+}
+
+@external(erlang, "logger", "set_primary_config")
+fn set_primary_config(key: atom.Atom, value: atom.Atom) -> Dynamic
+
+@external(erlang, "logger", "get_primary_config")
+fn primary_config() -> Dynamic
+
+pub fn log_install_raises_primary_level_without_a_file_test() {
+  let _ = set_primary_config(atom.create("level"), atom.create("notice"))
+  assert logs.install() == Ok(Nil)
+  assert decode.run(
+      primary_config(),
+      decode.field(atom.create("level"), atom.decoder(), decode.success),
+    )
+    |> result.map(atom.to_string)
+    == Ok("info")
 }
