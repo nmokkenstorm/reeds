@@ -1,5 +1,4 @@
 import gleam/erlang/process.{type Subject}
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, Some}
 import gleam/otp/actor
@@ -8,6 +7,7 @@ import gleam/result
 import reeds/health
 import reeds/hub
 import reeds/hub_call
+import reeds/logs
 
 /// A Source polls some upstream, diffs against its persisted state, and
 /// returns whispers to publish. Implementations own the diffing; the runner
@@ -128,7 +128,7 @@ fn poll_and_publish(state: State, previous: Option(String)) -> Int {
           list.Stop(False)
         }
         Ok(Error(error)) -> {
-          io.println(
+          logs.warning(
             "reeds: source " <> source.name <> " publish failed: " <> error,
           )
           list.Continue(False)
@@ -157,7 +157,7 @@ fn poll_and_publish(state: State, previous: Option(String)) -> Int {
 }
 
 fn log_miss(source: Source, failure: hub_call.Failure) -> Nil {
-  io.println(
+  logs.warning(
     "reeds: source " <> source.name <> ": " <> hub_call.describe(failure),
   )
 }

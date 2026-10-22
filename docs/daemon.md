@@ -2,27 +2,120 @@
 
 ## macOS (launchd)
 
-`launchd/dev.mokkenstorm.reeds.plist.template` keeps the daemon running
-(`KeepAlive`, `RunAtLoad`, logs to `~/Library/Logs/reeds.log`). launchd expands
-neither `~` nor environment variables in paths, so the template carries
-placeholders and you fill them in from the repo root:
+The agent runs an installed `erlang-shipment`, so a restart never compiles and
+the daemon does not care which branch is checked out. `bin/reeds-install`
+exports the shipment and swaps it in; the checkout and the Gleam toolchain are
+build-time only.
 
 ```sh
-sed -e "s|@GLEAM@|$(command -v gleam)|g" \
-    -e "s|@REPO@|$PWD|g" \
-    -e "s|@PATH@|$(dirname "$(command -v gleam)"):/usr/bin:/bin|g" \
+bin/reeds-install                        # ~/.local/share/reeds/app, or REEDS_INSTALL=<path>
+```
+
+`REEDS_SHIPMENT=<dir>` installs an already exported shipment instead of
+running `gleam export` (the tests use it to compile the esqlite NIF once).
+
+Each run builds into a sibling `app.<timestamp>.<pid>` directory and repoints the
+`app` symlink with one rename, keeping the previous two releases. The agent
+resolves the `app` link once at launch (`readlink -f`) and hands the real
+release path to `entrypoint.sh`, because erl loads modules lazily from its code
+path: through the link, a running daemon would pick up modules from the new
+release. Resolved, it keeps using the release it started from until restarted.
+`test/install_test.sh` swaps a release under a running instance and checks its
+code path.
+
+launchd expands neither `~` nor environment variables, so the templates carry
+placeholders. `@DB@` is the whisper log. The agent exports `REEDS_DB`, which
+takes precedence over `db` in `config.toml` (`src/reeds.gleam` reads the
+environment first), so the plist is the single source of truth for it. The live
+config's `db` already points at the existing log, so `REEDS_DB` is optional
+there; the plist sets it anyway so the two cannot drift. `REEDS_CONFIG` is
+pinned the same way and the working directory is `$HOME`; a relative `db` would
+otherwise resolve against it.
+
+```sh
+INSTALL=$HOME/.local/share/reeds/app
+DB=/Users/niels/Developer/mokkenstorm-dev/reeds/main/reeds.db   # the existing live log
+sed -e "s|@INSTALL@|$INSTALL|g" \
+    -e "s|@PATH@|$(dirname "$(command -v erl)"):/usr/bin:/bin|g" \
     -e "s|@HOME@|$HOME|g" \
+    -e "s|@DB@|$DB|g" \
   launchd/dev.mokkenstorm.reeds.plist.template \
   > ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
 
 plutil -lint ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
+launchctl bootout gui/$(id -u)/dev.mokkenstorm.reeds 2>/dev/null || true   # an older agent may be loaded
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
 launchctl kickstart -k gui/$(id -u)/dev.mokkenstorm.reeds   # restart
 ```
 
-The agent runs `gleam run` from the checkout, so the repo has to stay where it
-is and the Gleam toolchain has to remain installed. Re-run the `sed` after
-moving either.
+`bootout` unloads the old agent before `bootstrap`, so two daemons never hold
+the database at once.
+
+`erl` has to be on the agent's `PATH` (`entrypoint.sh` calls it), hence the
+`dirname` of `command -v erl`. To reuse an existing database, point `DB` at it
+(stop the daemon before moving one, and move `-wal` and `-shm` along).
+
+### Logs
+
+The daemon logs through OTP `logger`: app lines, crash reports and supervisor
+reports all land in `REEDS_LOG` (`~/Library/Logs/reeds.log` in the plist) via a
+`logger_std_h` file handler that rotates itself, so there is no pipe, no
+wrapper process and no root step. `src/reeds/logs.gleam` installs the handler
+when `main` starts; with `REEDS_LOG` unset the stdout default stays, which is
+what `gleam run` wants.
+
+| Variable              | Default             |
+| --------------------- | ------------------- |
+| `REEDS_LOG`           | unset (stdout)      |
+| `REEDS_LOG_MAX_BYTES` | `10485760` (10 MiB) |
+| `REEDS_LOG_MAX_FILES` | `5`                 |
+
+Rotated generations are `reeds.log.0.gz` (newest) through `reeds.log.4.gz`.
+Logging is asynchronous and drops lines past a 2000 message queue rather than
+blocking the daemon. If the log file cannot be opened the daemon says so and
+stays on stdout.
+
+launchd's `StandardOutPath` and `StandardErrorPath` point at
+`~/Library/Logs/reeds.stdout.log`, which stays near-empty: mist prints one
+`Listening on ...` line per boot, and anything the VM writes before `main`
+runs or after the handler is gone (boot failures, `erl` errors) lands there.
+
+### Watchdog
+
+A wedged daemon keeps its port open, so `KeepAlive` never fires. The watchdog
+agent runs `reeds-watchdog` every 60 seconds: it probes `/health` with a 3 second
+timeout and counts consecutive failures in `~/.local/state/reeds/watchdog.state`.
+At 3 it runs `launchctl kickstart -k` on the daemon, then refuses to restart
+again for 10 minutes so a slow boot is not killed. Each restart is logged to
+`~/Library/Logs/reeds-watchdog.log` (capped at 1 MiB, one `.1` generation kept), and once `/health` answers again it
+publishes one whisper on `reeds.meta`.
+
+```sh
+sed -e "s|@INSTALL@|$INSTALL|g" -e "s|@HOME@|$HOME|g" \
+  launchd/dev.mokkenstorm.reeds.watchdog.plist.template \
+  > ~/Library/LaunchAgents/dev.mokkenstorm.reeds.watchdog.plist
+
+plutil -lint ~/Library/LaunchAgents/dev.mokkenstorm.reeds.watchdog.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.mokkenstorm.reeds.watchdog.plist
+```
+
+Every knob is an environment variable, set in the plist when you need it:
+
+| Variable                     | Default                                                  |
+| ---------------------------- | -------------------------------------------------------- |
+| `REEDS_WATCHDOG_URL`         | `http://localhost:7333/health`                           |
+| `REEDS_WATCHDOG_THRESHOLD`   | `3`                                                      |
+| `REEDS_WATCHDOG_COOLDOWN`    | `600` (seconds)                                          |
+| `REEDS_WATCHDOG_TIMEOUT`     | `3` (seconds)                                            |
+| `REEDS_WATCHDOG_STATE_DIR`   | `~/.local/state/reeds`                                   |
+| `REEDS_WATCHDOG_RESTART_CMD` | `launchctl kickstart -k gui/<uid>/dev.mokkenstorm.reeds` |
+| `REEDS_WATCHDOG_PUBLISH_CMD` | `reeds-cli pub` (called with topic, body, kind)          |
+| `REEDS_WATCHDOG_LOG`         | unset (stdout); the plist sets the log path              |
+| `REEDS_WATCHDOG_LOG_MAX`     | `1048576` (bytes)                                        |
+
+`test/watchdog_test.sh` runs it against a closed port with a stubbed restart:
+one restart after three misses, none inside the cooldown, a counter that resets
+on success, and one whisper on recovery.
 
 ## Linux (systemd)
 

@@ -6,25 +6,37 @@
   <string>dev.mokkenstorm.reeds</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@GLEAM@</string>
-    <string>run</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec "$(/usr/bin/readlink -f "$0")/entrypoint.sh" run</string>
+    <string>@INSTALL@</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>@REPO@</string>
+  <string>@HOME@</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>@PATH@</string>
     <key>HOME</key>
     <string>@HOME@</string>
+    <key>REEDS_CONFIG</key>
+    <string>@HOME@/.config/reeds/config.toml</string>
+    <key>REEDS_LOG</key>
+    <string>@HOME@/Library/Logs/reeds.log</string>
+    <key>REEDS_LOG_MAX_BYTES</key>
+    <string>10485760</string>
+    <key>REEDS_LOG_MAX_FILES</key>
+    <string>5</string>
+    <key>REEDS_DB</key>
+    <string>@DB@</string>
   </dict>
   <key>KeepAlive</key>
   <true/>
   <key>RunAtLoad</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>@HOME@/Library/Logs/reeds.log</string>
+  <string>@HOME@/Library/Logs/reeds.stdout.log</string>
   <key>StandardErrorPath</key>
-  <string>@HOME@/Library/Logs/reeds.log</string>
+  <string>@HOME@/Library/Logs/reeds.stdout.log</string>
 </dict>
 </plist>

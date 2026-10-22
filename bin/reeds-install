@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Exports an erlang-shipment and points INSTALL at it with one rename, so a
+# restart never compiles and never sees a half-copied tree.
+INSTALL="${REEDS_INSTALL:-$HOME/.local/share/reeds/app}"
+case "$INSTALL" in /*) ;; *) INSTALL="$PWD/$INSTALL" ;; esac
+KEEP=2
+
+repo="$(cd "$(dirname "$0")/.." && pwd)"
+# The pid keeps two installs in the same second from nesting one release in the other.
+release="$INSTALL.$(date +%Y%m%d%H%M%S).$$"
+[ ! -e "$release" ] || { echo "reeds: $release already exists" >&2; exit 1; }
+
+mkdir -p "$(dirname "$INSTALL")"
+shipment="${REEDS_SHIPMENT:-}"
+[ -n "$shipment" ] || { (cd "$repo" && gleam export erlang-shipment); shipment="$repo/build/erlang-shipment"; }
+[ -x "$shipment/entrypoint.sh" ] || { echo "reeds: no shipment at $shipment" >&2; exit 1; }
+
+cp -R "$shipment" "$release.tmp"
+cp "$repo/bin/reeds" "$release.tmp/reeds-cli"
+cp "$repo/bin/reeds-watchdog" "$release.tmp/"
+mv "$release.tmp" "$release"
+
+[ -L "$INSTALL" ] || [ ! -e "$INSTALL" ] || mv "$INSTALL" "$INSTALL.legacy"
+rm -rf "$INSTALL.link"
+ln -sfh "$release" "$INSTALL.link"
+mv -fh "$INSTALL.link" "$INSTALL"
+
+# A daemon pinned to its starting release lazily loads modules from it, so a
+# release a running process or the link still points at is never pruned.
+running="$(ps -axo command= 2>/dev/null || true)"
+current="$(readlink -f "$INSTALL")"
+# shellcheck disable=SC2012
+ls -1d "$INSTALL".[0-9]*[0-9] | sort -r | tail -n +$((KEEP + 1)) | while IFS= read -r old; do
+  real="$(readlink -f "$old")"
+  [ "$real" != "$current" ] || continue
+  ! grep -qF "$real/" <<<"$running" || continue
+  rm -rf "$old"
+done
+echo "reeds: installed $release -> $INSTALL"

@@ -3,7 +3,6 @@ import gleam/http
 import gleam/http/request
 import gleam/httpc
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
@@ -15,6 +14,7 @@ import reeds/config.{type PeerSpec}
 import reeds/health
 import reeds/hub
 import reeds/hub_call
+import reeds/logs
 import reeds/sources/poller
 import reeds/whisper.{type Whisper}
 import reeds/wire
@@ -155,13 +155,13 @@ fn run_pull(state: State) -> health.FeedOutcome {
   ))
   case pull(peer, cursor) {
     Error(reason) -> {
-      io.println("reeds: peer " <> peer.name <> " pull failed: " <> reason)
+      logs.warning("reeds: peer " <> peer.name <> " pull failed: " <> reason)
       health.Unreachable("pull", reason)
     }
     Ok(#(whispers, next_cursor)) ->
       case ingest(state, whispers) {
         Error(reason) -> {
-          io.println(
+          logs.warning(
             "reeds: peer " <> peer.name <> " ingest failed: " <> reason,
           )
           health.Unreachable("pull", "local ingest failed: " <> reason)
@@ -195,7 +195,9 @@ fn run_push(state: State) -> health.FeedOutcome {
         || list.length(batch) < list.length(whispers)
       case push(peer, batch, cursor, more) {
         Error(reason) -> {
-          io.println("reeds: peer " <> peer.name <> " push failed: " <> reason)
+          logs.warning(
+            "reeds: peer " <> peer.name <> " push failed: " <> reason,
+          )
           health.Unreachable("push", reason)
         }
         Ok(next_cursor) -> {
@@ -223,7 +225,7 @@ fn try_local(
     Ok(reply) -> next(reply)
     Error(failure) -> {
       let reason = hub_call.describe(failure)
-      io.println("reeds: peer " <> state.peer.name <> ": " <> reason)
+      logs.warning("reeds: peer " <> state.peer.name <> ": " <> reason)
       health.Unreachable(feed, "local " <> reason)
     }
   }
@@ -284,7 +286,7 @@ fn record_poll(state: State, outcomes: List(health.FeedOutcome)) -> Nil {
   case recorded {
     Ok(_) -> Nil
     Error(failure) ->
-      io.println(
+      logs.warning(
         "reeds: peer " <> state.peer.name <> ": " <> hub_call.describe(failure),
       )
   }

@@ -1,7 +1,6 @@
 import envoy
 import gleam/erlang/process
 import gleam/int
-import gleam/io
 import gleam/list
 import gleam/otp/static_supervisor as supervisor
 import gleam/result
@@ -10,6 +9,7 @@ import reeds/api
 import reeds/config.{type PeerSpec, type SourceSpec, Both, Pull, Push}
 import reeds/health
 import reeds/hub
+import reeds/logs
 import reeds/peer
 import reeds/source.{type Source}
 import reeds/sources/bitbucket
@@ -18,6 +18,11 @@ import reeds/sources/gitlab
 import reeds/store
 
 pub fn main() {
+  case logs.install() {
+    Ok(_) -> Nil
+    Error(reason) ->
+      logs.warning("reeds: log file unusable, staying on stdout: " <> reason)
+  }
   let config = case config.load(config_path()) {
     Ok(config) -> config
     Error(reason) -> panic as { "reeds: " <> reason }
@@ -30,7 +35,7 @@ pub fn main() {
   let bind = envoy.get("REEDS_BIND") |> result.unwrap(config.bind)
 
   let assert Ok(conn) = store.open(db_path, origin: config.bridge_name)
-  io.println(
+  logs.info(
     "reeds: "
     <> db_path
     <> " (sqlite "
@@ -88,9 +93,7 @@ pub fn main() {
       }),
     )),
   )
-  io.println(
-    "reeds: listening on http://" <> bind <> ":" <> int.to_string(port),
-  )
+  logs.info("reeds: listening on http://" <> bind <> ":" <> int.to_string(port))
 
   process.sleep_forever()
 }
@@ -104,10 +107,10 @@ fn config_path() -> String {
 }
 
 /// `enabled = false` skips validation as well as polling, so a source can be
-/// parked without its now-stale credentials refusing the boot. Announced on
-/// stdout because a silently absent source is the failure mode reeds avoids.
+/// parked without its now-stale credentials refusing the boot. Announced in
+/// the log because a silently absent source is the failure mode reeds avoids.
 fn announce_disabled(spec: SourceSpec) -> Nil {
-  io.println("reeds: source " <> spec.name <> " (" <> spec.kind <> ") disabled")
+  logs.info("reeds: source " <> spec.name <> " (" <> spec.kind <> ") disabled")
 }
 
 fn announce_peer(peer: PeerSpec) -> Nil {
@@ -116,7 +119,7 @@ fn announce_peer(peer: PeerSpec) -> Nil {
     Push -> "pushing"
     Both -> "pulling+pushing"
   }
-  io.println(
+  logs.info(
     "reeds: peer " <> peer.name <> " (" <> peer.url <> ") " <> direction,
   )
 }
@@ -133,7 +136,7 @@ fn build_source(spec: SourceSpec) -> Source {
   case built {
     Error(reason) -> panic as { "reeds: " <> reason }
     Ok(src) -> {
-      io.println(
+      logs.info(
         "reeds: source " <> spec.name <> " (" <> spec.kind <> ") polling",
       )
       src
