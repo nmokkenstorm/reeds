@@ -11,7 +11,10 @@ build-time only.
 bin/reeds-install                        # ~/.local/share/reeds/app, or REEDS_INSTALL=<path>
 ```
 
-Each run builds into a sibling `app.<timestamp>` directory and repoints the
+`REEDS_SHIPMENT=<dir>` installs an already exported shipment instead of
+running `gleam export` (the tests use it to compile the esqlite NIF once).
+
+Each run builds into a sibling `app.<timestamp>.<pid>` directory and repoints the
 `app` symlink with one rename, keeping the previous two releases. The agent
 resolves the `app` link once at launch (`readlink -f`) and hands the real
 release path to `entrypoint.sh`, because erl loads modules lazily from its code
