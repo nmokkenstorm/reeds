@@ -4,6 +4,7 @@ set -euo pipefail
 # Exports an erlang-shipment and points INSTALL at it with one rename, so a
 # restart never compiles and never sees a half-copied tree.
 INSTALL="${REEDS_INSTALL:-$HOME/.local/share/reeds/app}"
+case "$INSTALL" in /*) ;; *) INSTALL="$PWD/$INSTALL" ;; esac
 KEEP=2
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
@@ -18,9 +19,10 @@ cp "$repo/bin/reeds-watchdog" "$release.tmp/"
 mv "$release.tmp" "$release"
 
 [ -L "$INSTALL" ] || [ ! -e "$INSTALL" ] || mv "$INSTALL" "$INSTALL.legacy"
-ln -s "$release" "$INSTALL.link"
+rm -rf "$INSTALL.link"
+ln -sfh "$release" "$INSTALL.link"
 mv -fh "$INSTALL.link" "$INSTALL"
 
 # shellcheck disable=SC2012
-ls -1dt "$INSTALL".[0-9]* | tail -n +$((KEEP + 1)) | xargs -I{} rm -rf {}
+ls -1dt "$INSTALL".[0-9]*[0-9] | tail -n +$((KEEP + 1)) | xargs -I{} rm -rf {}
 echo "reeds: installed $release -> $INSTALL"

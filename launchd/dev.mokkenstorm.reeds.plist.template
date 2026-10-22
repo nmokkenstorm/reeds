@@ -6,8 +6,10 @@
   <string>dev.mokkenstorm.reeds</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@INSTALL@/entrypoint.sh</string>
-    <string>run</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>exec "$(/usr/bin/readlink -f "$0")/entrypoint.sh" run</string>
+    <string>@INSTALL@</string>
   </array>
   <key>WorkingDirectory</key>
   <string>@HOME@</string>

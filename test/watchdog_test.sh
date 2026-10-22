@@ -55,6 +55,15 @@ kill "$server"; wait "$server" 2>/dev/null || true
 probe; probe
 expect "counter restarts from zero after a success" "$(count restarts)" 2
 
+# shellcheck disable=SC2016
+printf 'fails=HOME[$(touch %s/pwned)]\nlast_restart=abc\npending_whisper=08\n' "$work" >"$work/state/watchdog.state"
+probe
+expect "state file values are not evaluated" "$([ -e "$work/pwned" ] && echo yes || echo no)" no
+expect "garbage counter reads as zero" "$(sed -n 's/^fails=//p' "$work/state/watchdog.state")" 1
+printf 'fails=abc\nlast_restart=\npending_whisper=\n' >"$work/state/watchdog.state"
+probe
+expect "non-numeric counter does not kill the probe" "$(sed -n 's/^fails=//p' "$work/state/watchdog.state")" 1
+
 export REEDS_WATCHDOG_LOG="$work/wd.log" REEDS_WATCHDOG_LOG_MAX=200
 for _ in 1 2 3 4 5 6 7 8; do probe; done
 expect "log rotated to one kept generation" "$([ -f "$work/wd.log.1" ] && echo yes || echo no)" yes

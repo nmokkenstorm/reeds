@@ -12,19 +12,26 @@ bin/reeds-install                        # ~/.local/share/reeds/app, or REEDS_IN
 ```
 
 Each run builds into a sibling `app.<timestamp>` directory and repoints the
-`app` symlink with one rename, keeping the previous two releases. A running
-daemon keeps using the release it started from until it is restarted.
+`app` symlink with one rename, keeping the previous two releases. The agent
+resolves the `app` link once at launch (`readlink -f`) and hands the real
+release path to `entrypoint.sh`, because erl loads modules lazily from its code
+path: through the link, a running daemon would pick up modules from the new
+release. Resolved, it keeps using the release it started from until restarted.
+`test/install_test.sh` swaps a release under a running instance and checks its
+code path.
 
 launchd expands neither `~` nor environment variables, so the templates carry
-placeholders. `@DB@` is the whisper log and is always set explicitly: the
-agent exports `REEDS_DB`, which takes precedence over `db` in `config.toml`
-(`src/reeds.gleam` reads the environment first), so the plist is the single
-source of truth for it. `REEDS_CONFIG` is pinned the same way and the working
-directory is `$HOME`; a relative `db` would otherwise resolve against it.
+placeholders. `@DB@` is the whisper log. The agent exports `REEDS_DB`, which
+takes precedence over `db` in `config.toml` (`src/reeds.gleam` reads the
+environment first), so the plist is the single source of truth for it. The live
+config's `db` already points at the existing log, so `REEDS_DB` is optional
+there; the plist sets it anyway so the two cannot drift. `REEDS_CONFIG` is
+pinned the same way and the working directory is `$HOME`; a relative `db` would
+otherwise resolve against it.
 
 ```sh
 INSTALL=$HOME/.local/share/reeds/app
-DB=$HOME/.local/share/reeds/reeds.db     # or wherever the existing log lives
+DB=/Users/niels/Developer/mokkenstorm-dev/reeds/main/reeds.db   # the existing live log
 sed -e "s|@INSTALL@|$INSTALL|g" \
     -e "s|@PATH@|$(dirname "$(command -v erl)"):/usr/bin:/bin|g" \
     -e "s|@HOME@|$HOME|g" \
@@ -33,9 +40,13 @@ sed -e "s|@INSTALL@|$INSTALL|g" \
   > ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
 
 plutil -lint ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
+launchctl bootout gui/$(id -u)/dev.mokkenstorm.reeds 2>/dev/null || true   # an older agent may be loaded
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.mokkenstorm.reeds.plist
 launchctl kickstart -k gui/$(id -u)/dev.mokkenstorm.reeds   # restart
 ```
+
+`bootout` unloads the old agent before `bootstrap`, so two daemons never hold
+the database at once.
 
 `erl` has to be on the agent's `PATH` (`entrypoint.sh` calls it), hence the
 `dirname` of `command -v erl`. To reuse an existing database, point `DB` at it

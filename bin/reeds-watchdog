@@ -31,7 +31,14 @@ log() {
   echo "$line" >>"$LOG_FILE"
 }
 
-field() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -n 1 || true; }
+# The state file is data, never arithmetic input: anything but a short run of digits reads as 0.
+field() {
+  v="$(sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -n 1 || true)"
+  case "$v" in
+    '' | *[!0-9]* | [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]*) echo 0 ;;
+    *) echo $((10#$v)) ;;
+  esac
+}
 
 save() {
   mkdir -p "$STATE_DIR"
@@ -39,9 +46,9 @@ save() {
   mv "$STATE.tmp" "$STATE"
 }
 
-fails="$(field fails)"; fails="${fails:-0}"
-last_restart="$(field last_restart)"; last_restart="${last_restart:-0}"
-pending="$(field pending_whisper)"; pending="${pending:-0}"
+fails="$(field fails)"
+last_restart="$(field last_restart)"
+pending="$(field pending_whisper)"
 now="$(date +%s)"
 
 if curl -sf -m "$TIMEOUT" -o /dev/null "$URL"; then
