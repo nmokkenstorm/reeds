@@ -24,6 +24,7 @@ install
 expect "install links app" "$([ -L "$REEDS_INSTALL" ] && echo yes || echo no)" yes
 expect "leftover app.link directory is cleared" "$([ -e "$work/app.link" ] && echo yes || echo no)" no
 first="$(/usr/bin/readlink -f "$REEDS_INSTALL")"
+expect "release ships reeds-backup" "$([ -x "$first/reeds-backup" ] && echo yes || echo no)" yes
 
 sed -e "s|@INSTALL@|$REEDS_INSTALL|g" -e "s|@PATH@|$PATH|g" -e "s|@HOME@|$HOME|g" -e "s|@DB@|$work/t.db|g" \
   "$root/launchd/dev.mokkenstorm.reeds.plist.template" >"$work/agent.plist"

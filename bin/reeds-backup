@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+SELF="$(dirname "$(/usr/bin/readlink -f "${BASH_SOURCE[0]}")")"
+CLI="$SELF/reeds-cli"; [ -x "$CLI" ] || CLI="$SELF/reeds"
+REEDS_BIN="${REEDS_BIN:-$CLI}"
+TOPIC="reeds.meta.backup"
+KEYS="REEDS_DB REEDS_BACKUP_DEST REEDS_BACKUP_REQUIRE_MOUNT REEDS_BACKUP_KEEP_DAYS REEDS_BACKUP_PREFIX REEDS_BACKUP_VOLUME_UUID"
+
+tmp=""
+stage="config"
+detail=""
+
+on_exit() {
+  local code=$?
+  [ -n "$tmp" ] && rm -rf "$tmp"
+  [ "$code" -eq 0 ] && return 0
+  local msg
+  msg="$(printf 'backup failed at %s%s' "$stage" "${detail:+: $detail}" | LC_ALL=C tr -cd '[:print:]' | tr -d "\"\\\\")"
+  echo "reeds-backup: $msg" >&2
+  REEDS_SENDER=reeds-backup "$REEDS_BIN" pub "$TOPIC" \
+    "{\"msg\":\"$msg\"}" needs-user >/dev/null 2>&1 || true
+  return "$code"
+}
+trap on_exit EXIT
+
+die() { detail="$1"; exit 1; }
+
+is_known_key() { case " $KEYS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+load_config_file() {
+  local file="$1" line key value n=0
+  while IFS= read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    case "$line" in ''|'#'*) continue ;; esac
+    [[ "$line" =~ ^([A-Z_]+)=(.*)$ ]] || die "malformed line $n in $file"
+    key="${BASH_REMATCH[1]}"
+    value="${BASH_REMATCH[2]}"
+    is_known_key "$key" || die "unknown key $key on line $n in $file"
+    value="${value#\"}"
+    value="${value%\"}"
+    [ -n "${!key+x}" ] || printf -v "$key" '%s' "$value"
+  done < "$file"
+}
+
+toml_db() {
+  awk '
+    /^[[:space:]]*\[/ { exit }
+    match($0, /^[[:space:]]*db[[:space:]]*=[[:space:]]*"[^"]*"/) {
+      s = substr($0, RSTART, RLENGTH); sub(/^[^"]*"/, "", s); sub(/"$/, "", s); print s; exit
+    }' "$1"
+}
+
+resolve_db() {
+  local cfg="${REEDS_CONFIG:-$HOME/.config/reeds/config.toml}" db=""
+  [ -f "$cfg" ] && db="$(toml_db "$cfg")"
+  case "$db" in
+    '') ;;
+    /*) echo "$db" ;;
+    *) echo "$HOME/$db" ;;
+  esac
+}
+
+mounts() {
+  if [ -n "${REEDS_BACKUP_MOUNTS_FILE:-}" ]; then
+    cat "$REEDS_BACKUP_MOUNTS_FILE"
+    return
+  fi
+  mount
+}
+
+is_mounted() { mounts | grep -qF " on $1 ("; }
+
+volume_uuid() {
+  "${REEDS_BACKUP_DISKUTIL:-diskutil}" info -plist "$1" | plutil -extract VolumeUUID raw -o - -
+}
+
+has_dotdot() { case "/$1/" in */../*) return 0 ;; *) return 1 ;; esac; }
+
+resolve_dir() { (cd -P "$1" 2>/dev/null && pwd -P); }
+
+cfg_file="${REEDS_BACKUP_CONFIG:-$HOME/.config/reeds/backup.env}"
+if [ -f "$cfg_file" ]; then
+  load_config_file "$cfg_file"
+elif [ -n "${REEDS_BACKUP_CONFIG:-}" ]; then
+  die "config file not found: $cfg_file"
+fi
+
+DB="${REEDS_DB:-$(resolve_db)}"
+[ -n "$DB" ] || die "no database: set REEDS_DB or a top-level db in config.toml"
+DEST="${REEDS_BACKUP_DEST:-}"
+MOUNT="${REEDS_BACKUP_REQUIRE_MOUNT:-}"
+MOUNT="${MOUNT%/}"
+KEEP_DAYS="${REEDS_BACKUP_KEEP_DAYS-30}"
+PREFIX="${REEDS_BACKUP_PREFIX-reeds}"
+
+[ -n "$DEST" ] || die "REEDS_BACKUP_DEST is required"
+case "$DEST" in /*) ;; *) die "REEDS_BACKUP_DEST must be an absolute path" ;; esac
+[[ "$KEEP_DAYS" =~ ^[1-9][0-9]*$ ]] || die "REEDS_BACKUP_KEEP_DAYS must be a positive integer"
+[[ "$PREFIX" =~ ^[a-z0-9-]+$ ]] || die "REEDS_BACKUP_PREFIX must match [a-z0-9-]"
+[ -z "$MOUNT" ] || case "$MOUNT" in /*) ;; *) die "REEDS_BACKUP_REQUIRE_MOUNT must be an absolute path" ;; esac
+has_dotdot "$DEST" && die "REEDS_BACKUP_DEST must not contain .. segments"
+has_dotdot "$MOUNT" && die "REEDS_BACKUP_REQUIRE_MOUNT must not contain .. segments"
+[ -z "$MOUNT" ] || case "$DEST/" in "$MOUNT/"*) ;; *) die "REEDS_BACKUP_DEST is not under REEDS_BACKUP_REQUIRE_MOUNT" ;; esac
+UUID="${REEDS_BACKUP_VOLUME_UUID:-}"
+[ -z "$UUID" ] || [ -n "$MOUNT" ] || die "REEDS_BACKUP_VOLUME_UUID needs REEDS_BACKUP_REQUIRE_MOUNT"
+[ -z "$UUID" ] || [[ "$UUID" =~ ^[0-9A-Fa-f-]{36}$ ]] || die "REEDS_BACKUP_VOLUME_UUID is not a UUID"
+[ -f "$DB" ] || die "database not found: $DB"
+
+[ -z "$MOUNT" ] || is_mounted "$MOUNT" || exit 0
+
+stage="volume identity"
+if [ -n "$UUID" ]; then
+  actual="$(volume_uuid "$MOUNT")" || die "could not read the volume UUID of the mount"
+  [ "$(printf %s "$actual" | tr a-f A-F)" = "$(printf %s "$UUID" | tr a-f A-F)" ] || die "volume UUID does not match REEDS_BACKUP_VOLUME_UUID"
+fi
+
+tmp="$(mktemp -d)"
+name="$PREFIX-$(date +%Y-%m-%d).db.gz"
+
+stage="snapshot"
+sqlite3 "$DB" ".backup '$tmp/$PREFIX.db'"
+
+stage="integrity check"
+[ "$(sqlite3 "$tmp/$PREFIX.db" 'PRAGMA integrity_check')" = "ok" ] || die "snapshot failed integrity_check"
+
+stage="gzip"
+gzip -c "$tmp/$PREFIX.db" > "$tmp/$name"
+
+stage="rsync"
+if [ -n "$MOUNT" ]; then
+  anchor="$DEST"
+  until [ -d "$anchor" ]; do anchor="$(dirname "$anchor")"; done
+  real_anchor="$(resolve_dir "$anchor")" || die "cannot resolve REEDS_BACKUP_DEST"
+  real_mount="$(resolve_dir "$MOUNT")" || die "cannot resolve REEDS_BACKUP_REQUIRE_MOUNT"
+  case "$real_anchor/" in "$real_mount/"*) ;; *) die "REEDS_BACKUP_DEST resolves outside REEDS_BACKUP_REQUIRE_MOUNT" ;; esac
+fi
+mkdir -p "$DEST"
+chmod 700 "$DEST"
+chmod 600 "$tmp/$name"
+nice -n 19 rsync -a "$tmp/$name" "$DEST/$name"
+
+stage="prune"
+find -H "$DEST" -maxdepth 1 -type f -name "$PREFIX-????-??-??.db.gz" -mtime "+$KEEP_DAYS" -delete
+
+size="$(stat -f %z "$tmp/$name")"
+dest_msg="$(printf '%s/%s' "$DEST" "$name" | LC_ALL=C tr -cd '[:print:]' | tr -d "\"\\\\")"
+REEDS_SENDER=reeds-backup "$REEDS_BIN" pub "$TOPIC" \
+  "{\"event\":\"backup.ok\",\"date\":\"$(date +%Y-%m-%d)\",\"bytes\":$size,\"dest\":\"$dest_msg\"}" status >/dev/null 2>&1 || true
