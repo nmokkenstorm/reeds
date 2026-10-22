@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# One probe per invocation; launchd supplies the cadence. A wedged daemon keeps
+# its port open, so KeepAlive never fires and only a failed /health notices.
+HERE="$(cd "$(dirname "$0")" && pwd)"
+URL="${REEDS_WATCHDOG_URL:-http://localhost:7333/health}"
+THRESHOLD="${REEDS_WATCHDOG_THRESHOLD:-3}"
+COOLDOWN="${REEDS_WATCHDOG_COOLDOWN:-600}"
+TIMEOUT="${REEDS_WATCHDOG_TIMEOUT:-3}"
+STATE_DIR="${REEDS_WATCHDOG_STATE_DIR:-$HOME/.local/state/reeds}"
+RESTART_CMD="${REEDS_WATCHDOG_RESTART_CMD:-launchctl kickstart -k gui/$(id -u)/dev.mokkenstorm.reeds}"
+CLI="$HERE/reeds-cli"; [ -x "$CLI" ] || CLI="$HERE/reeds"
+PUBLISH_CMD="${REEDS_WATCHDOG_PUBLISH_CMD:-$CLI pub}"
+STATE="$STATE_DIR/watchdog.state"
+export REEDS_SENDER="${REEDS_SENDER:-watchdog}"
+
+log() { printf '%s reeds-watchdog: %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*"; }
+
+field() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -n 1 || true; }
+
+save() {
+  mkdir -p "$STATE_DIR"
+  printf 'fails=%s\nlast_restart=%s\npending_whisper=%s\n' "$1" "$2" "$3" >"$STATE.tmp"
+  mv "$STATE.tmp" "$STATE"
+}
+
+fails="$(field fails)"; fails="${fails:-0}"
+last_restart="$(field last_restart)"; last_restart="${last_restart:-0}"
+pending="$(field pending_whisper)"; pending="${pending:-0}"
+now="$(date +%s)"
+
+if curl -sf -m "$TIMEOUT" -o /dev/null "$URL"; then
+  [ "$pending" = 0 ] || {
+    # shellcheck disable=SC2086
+    if $PUBLISH_CMD reeds.meta "{\"event\":\"watchdog.restarted\",\"restarted_at\":$last_restart,\"recovered_at\":$now}" status >/dev/null; then
+      log "daemon answering again, whispered on reeds.meta"
+      pending=0
+    else
+      log "daemon answering again, whisper failed; will retry"
+    fi
+  }
+  save 0 "$last_restart" "$pending"
+  exit 0
+fi
+
+fails=$((fails + 1))
+log "probe failed ($fails/$THRESHOLD): $URL"
+
+[ "$fails" -ge "$THRESHOLD" ] || { save "$fails" "$last_restart" "$pending"; exit 0; }
+
+since=$((now - last_restart))
+[ "$since" -ge "$COOLDOWN" ] || {
+  log "cooldown: restarted ${since}s ago, waiting for ${COOLDOWN}s"
+  save "$fails" "$last_restart" "$pending"
+  exit 0
+}
+
+log "restarting after $fails consecutive failures: $RESTART_CMD"
+# shellcheck disable=SC2086
+$RESTART_CMD || log "restart command failed"
+save "$fails" "$now" 1
