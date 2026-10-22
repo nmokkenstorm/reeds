@@ -14,7 +14,9 @@ import reeds/config
 import reeds/health
 import reeds/host
 import reeds/hub
+import reeds/hub_call
 import reeds/peer
+import reeds/source
 import reeds/sources/bitbucket
 import reeds/sources/github
 import reeds/sources/gitlab
@@ -1927,4 +1929,147 @@ pub fn state_list_to_json_string_test() {
   ]
   assert state.list_to_json_string(entries)
     == "[{\"topic\":\"a.b\",\"ts\":1,\"sender\":\"t\",\"kind\":\"note\",\"body\":{}},{\"topic\":\"a.c\",\"ts\":2,\"sender\":\"t\",\"kind\":\"note\",\"body\":{}}]"
+}
+
+/// A hub subject nobody reads: every call to it misses its deadline.
+fn stalled_hub() -> process.Subject(hub.Msg) {
+  process.new_subject()
+}
+
+/// A hub that answers every call, except that the first `GetSourceState`
+/// sleeps `first_delay_ms` before replying (a late reply the caller has
+/// already given up on).
+fn laggy_hub(first_delay_ms: Int) -> process.Subject(hub.Msg) {
+  let ready = process.new_subject()
+  process.spawn(fn() {
+    let inbox = process.new_subject()
+    process.send(ready, inbox)
+    serve_laggy(inbox, first_delay_ms)
+  })
+  let assert Ok(inbox) = process.receive(ready, 1000)
+  inbox
+}
+
+fn serve_laggy(inbox: process.Subject(hub.Msg), delay_ms: Int) -> Nil {
+  case process.receive_forever(inbox) {
+    hub.GetSourceState(_, reply) -> {
+      process.sleep(delay_ms)
+      process.send(reply, None)
+      serve_laggy(inbox, 0)
+    }
+    hub.RecordPoll(_, _, reply) -> {
+      process.send(reply, 0)
+      serve_laggy(inbox, delay_ms)
+    }
+    hub.Publish(_, _, _, _, _, reply) -> {
+      process.send(reply, Ok(1))
+      serve_laggy(inbox, delay_ms)
+    }
+    _ -> serve_laggy(inbox, delay_ms)
+  }
+}
+
+pub fn hub_call_reports_a_missed_deadline_test() {
+  let assert Error(hub_call.TimedOut("Health", 50)) =
+    hub_call.call(stalled_hub(), 50, "Health", hub.Health)
+  assert hub_call.describe(hub_call.TimedOut("Health", 50))
+    == "hub did not answer Health within 50ms"
+}
+
+@external(erlang, "reeds_mailbox_ffi", "len")
+fn mailbox_len(pid: process.Pid) -> Result(Int, Nil)
+
+pub fn hub_call_leaves_no_late_reply_in_the_caller_mailbox_test() {
+  let ready = process.new_subject()
+  process.spawn(fn() {
+    let inbox = process.new_subject()
+    process.send(ready, inbox)
+    let assert hub.Health(reply) = process.receive_forever(inbox)
+    process.sleep(200)
+    process.send(reply, Ok([]))
+  })
+  let assert Ok(slow_hub) = process.receive(ready, 1000)
+  let me = process.self()
+  let assert Ok(before) = mailbox_len(me)
+
+  let assert Error(hub_call.TimedOut(_, _)) =
+    hub_call.call(slow_hub, 50, "Health", hub.Health)
+  process.sleep(500)
+
+  let assert Ok(after) = mailbox_len(me)
+  assert after == before
+}
+
+pub fn hub_call_returns_a_prompt_reply_test() {
+  let #(h, _port) = start_bridge("hub1")
+  let assert Ok(Ok(_)) = hub_call.call(h, 1000, "Health", hub.Health)
+}
+
+pub fn source_survives_a_hub_timeout_and_polls_next_tick_test() {
+  let polled = process.new_subject()
+  let src =
+    source.Source(
+      name: "slow",
+      interval_ms: 50,
+      backoff_cap_ms: 1000,
+      poll: fn(previous) {
+        process.send(polled, previous)
+        source.Poll(baseline: None, drafts: [], feeds: [])
+      },
+    )
+  let assert Ok(started) = source.start_within(src, laggy_hub(400), 100)
+
+  let assert Ok(None) = process.receive(polled, 3000)
+  assert process.is_alive(started.pid)
+  process.unlink(started.pid)
+  process.kill(started.pid)
+}
+
+pub fn peer_survives_a_hub_timeout_test() {
+  let spec =
+    config.PeerSpec(
+      ..pull_peer("nowhere", 1),
+      mode: config.Both,
+      interval_ms: 50,
+    )
+  let assert Ok(started) = peer.start_within(spec, stalled_hub(), 50)
+  process.sleep(600)
+  assert process.is_alive(started.pid)
+  process.unlink(started.pid)
+  process.kill(started.pid)
+}
+
+pub fn routes_answer_503_when_the_hub_times_out_test() {
+  let port_subject = process.new_subject()
+  let builder =
+    mist.new(api.handler_within(stalled_hub(), [], 100))
+    |> mist.bind("127.0.0.1")
+    |> mist.port(0)
+    |> mist.after_start(fn(port, _scheme, _ip) {
+      process.send(port_subject, port)
+    })
+  let assert Ok(_) = mist.start(builder)
+  let assert Ok(port) = process.receive(port_subject, 2000)
+  let ingest_body = since_envelope([], 0, False)
+
+  [
+    #(http.Get, "/health", ""),
+    #(http.Get, "/state", ""),
+    #(http.Get, "/t/agents?since=0", ""),
+    #(http.Get, "/t/agents?last=5", ""),
+    #(http.Post, "/t/agents.turtle", "{}"),
+    #(http.Post, "/ingest", ingest_body),
+  ]
+  |> list.each(fn(route) {
+    let #(method, path, body) = route
+    let assert Ok(req) =
+      request.to("http://127.0.0.1:" <> int.to_string(port) <> path)
+    let assert Ok(resp) =
+      req
+      |> request.set_method(method)
+      |> request.set_body(body)
+      |> httpc.send
+    assert resp.status == 503
+    assert string.contains(resp.body, "\"error\":\"hub did not answer")
+  })
 }

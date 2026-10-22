@@ -7,6 +7,7 @@ import gleam/otp/supervision
 import gleam/result
 import reeds/health
 import reeds/hub
+import reeds/hub_call
 
 /// A Source polls some upstream, diffs against its persisted state, and
 /// returns whispers to publish. Implementations own the diffing; the runner
@@ -42,7 +43,12 @@ pub opaque type Msg {
 }
 
 type State {
-  State(source: Source, hub: Subject(hub.Msg), self: Subject(Msg))
+  State(
+    source: Source,
+    hub: Subject(hub.Msg),
+    self: Subject(Msg),
+    timeout_ms: Int,
+  )
 }
 
 /// Supervised child spec: a crashed source restarts clean and reloads its
@@ -58,9 +64,17 @@ pub fn start(
   source: Source,
   hub: Subject(hub.Msg),
 ) -> Result(actor.Started(Subject(Msg)), actor.StartError) {
+  start_within(source, hub, hub_call.default_timeout_ms)
+}
+
+pub fn start_within(
+  source: Source,
+  hub: Subject(hub.Msg),
+  timeout_ms: Int,
+) -> Result(actor.Started(Subject(Msg)), actor.StartError) {
   actor.new_with_initialiser(1000, fn(self) {
     process.send(self, Tick)
-    State(source:, hub:, self:)
+    State(source:, hub:, self:, timeout_ms:)
     |> actor.initialised
     |> actor.selecting(process.new_selector() |> process.select(self))
     |> actor.returning(self)
@@ -70,32 +84,57 @@ pub fn start(
   |> actor.start
 }
 
+/// A hub that misses its deadline costs this tick, never the actor: with the
+/// baseline unknown the poll is skipped (polling blind would republish
+/// everything), and the next tick retries on the plain interval.
 fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
   let Tick = msg
   let source = state.source
-  let previous =
-    process.call(state.hub, waiting: 5000, sending: hub.GetSourceState(
-      source.name,
-      _,
-    ))
+  let delay = case
+    hub_call.call(
+      state.hub,
+      state.timeout_ms,
+      "GetSourceState",
+      hub.GetSourceState(source.name, _),
+    )
+  {
+    Error(failure) -> {
+      log_miss(source, failure)
+      source.interval_ms
+    }
+    Ok(previous) -> poll_and_publish(state, previous)
+  }
+  process.send_after(state.self, delay, Tick)
+  actor.continue(state)
+}
+
+fn poll_and_publish(state: State, previous: Option(String)) -> Int {
+  let source = state.source
   let poll = source.poll(previous)
   let published =
-    list.fold(poll.drafts, True, fn(all_ok, draft) {
-      process.call(state.hub, waiting: 5000, sending: hub.Publish(
-        draft.topic,
-        source.name,
-        draft.kind,
-        draft.body,
-        draft.idem,
-        _,
-      ))
-      |> result.map_error(fn(error) {
-        io.println(
-          "reeds: source " <> source.name <> " publish failed: " <> error,
-        )
-      })
-      |> result.is_ok
-      && all_ok
+    list.fold_until(poll.drafts, True, fn(all_ok, draft) {
+      let outcome =
+        hub_call.call(state.hub, state.timeout_ms, "Publish", hub.Publish(
+          draft.topic,
+          source.name,
+          draft.kind,
+          draft.body,
+          draft.idem,
+          _,
+        ))
+      case outcome {
+        Error(failure) -> {
+          log_miss(source, failure)
+          list.Stop(False)
+        }
+        Ok(Error(error)) -> {
+          io.println(
+            "reeds: source " <> source.name <> " publish failed: " <> error,
+          )
+          list.Continue(False)
+        }
+        Ok(Ok(_)) -> list.Continue(all_ok)
+      }
     })
   // A failed publish keeps the old baseline, so the drafts are rebuilt and
   // retried next poll instead of being lost forever.
@@ -107,15 +146,18 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
   // The hub answers with the all-feeds-failing streak, so backoff policy
   // stays here with the rest of the scheduling.
   let down_streak =
-    process.call(state.hub, waiting: 5000, sending: hub.RecordPoll(
+    hub_call.call(state.hub, state.timeout_ms, "RecordPoll", hub.RecordPoll(
       source.name,
       poll.feeds,
       _,
     ))
-  process.send_after(
-    state.self,
-    health.backoff(source.interval_ms, down_streak, source.backoff_cap_ms),
-    Tick,
+    |> result.map_error(log_miss(source, _))
+    |> result.unwrap(0)
+  health.backoff(source.interval_ms, down_streak, source.backoff_cap_ms)
+}
+
+fn log_miss(source: Source, failure: hub_call.Failure) -> Nil {
+  io.println(
+    "reeds: source " <> source.name <> ": " <> hub_call.describe(failure),
   )
-  actor.continue(state)
 }
