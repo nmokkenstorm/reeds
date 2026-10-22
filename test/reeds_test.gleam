@@ -1,3 +1,4 @@
+import gleam/dynamic/decode
 import gleam/erlang/process
 import gleam/http
 import gleam/http/request
@@ -2072,4 +2073,16 @@ pub fn routes_answer_503_when_the_hub_times_out_test() {
     assert resp.status == 503
     assert string.contains(resp.body, "\"error\":\"hub did not answer")
   })
+}
+
+pub fn store_sets_a_busy_timeout_test() {
+  let assert Ok(conn) = store.open(":memory:", origin: "hub1")
+  let assert Ok([timeout]) =
+    sqlight.query(
+      "pragma busy_timeout",
+      on: conn,
+      with: [],
+      expecting: decode.field(0, decode.int, decode.success),
+    )
+  assert timeout == 3000
 }
