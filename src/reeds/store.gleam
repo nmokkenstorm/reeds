@@ -54,8 +54,13 @@ create table if not exists cursors(
 ) strict;
 "
 
+/// Under the hub's 5s call deadline, so a locked database surfaces as a
+/// store error the hub can reply with rather than a caller-side timeout.
+const busy_timeout_pragma = "pragma busy_timeout = 3000;"
+
 pub fn open(path: String, origin origin: String) -> Result(Connection, Error) {
   use conn <- result.try(sqlight.open(path))
+  use _ <- result.try(sqlight.exec(busy_timeout_pragma, conn))
   use _ <- result.try(sqlight.exec("pragma journal_mode = wal;", conn))
   use _ <- result.try(migrate(conn, origin))
   Ok(conn)

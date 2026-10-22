@@ -14,6 +14,7 @@ import reeds/clock
 import reeds/config.{type PeerSpec}
 import reeds/health
 import reeds/hub
+import reeds/hub_call
 import reeds/sources/poller
 import reeds/whisper.{type Whisper}
 import reeds/wire
@@ -47,6 +48,7 @@ type State {
     self: Subject(Msg),
     pull: Direction,
     push: Direction,
+    timeout_ms: Int,
   )
 }
 
@@ -70,9 +72,17 @@ pub fn start(
   peer: PeerSpec,
   hub: Subject(hub.Msg),
 ) -> Result(actor.Started(Subject(Msg)), actor.StartError) {
+  start_within(peer, hub, hub_call.default_timeout_ms)
+}
+
+pub fn start_within(
+  peer: PeerSpec,
+  hub: Subject(hub.Msg),
+  timeout_ms: Int,
+) -> Result(actor.Started(Subject(Msg)), actor.StartError) {
   actor.new_with_initialiser(1000, fn(self) {
     process.send(self, Tick)
-    State(peer:, hub:, self:, pull: fresh(), push: fresh())
+    State(peer:, hub:, self:, pull: fresh(), push: fresh(), timeout_ms:)
     |> actor.initialised
     |> actor.selecting(process.new_selector() |> process.select(self))
     |> actor.returning(self)
@@ -103,7 +113,7 @@ fn handle(state: State, msg: Msg) -> actor.Next(State, Msg) {
   }
   let outcomes =
     list.append(option.values([pull_dir.last]), option.values([push_dir.last]))
-  let _ = record_poll(state, outcomes)
+  record_poll(state, outcomes)
   process.send_after(state.self, peer.interval_ms, Tick)
   actor.continue(State(..state, pull: pull_dir, push: push_dir))
 }
@@ -139,11 +149,10 @@ fn attempt(
 /// prefixed `local` when this bridge, not the peer, is what failed.
 fn run_pull(state: State) -> health.FeedOutcome {
   let peer = state.peer
-  let cursor =
-    process.call(state.hub, waiting: 5000, sending: hub.GetPeerCursor(
-      peer.name,
-      _,
-    ))
+  use cursor <- try_local(state, "pull", "GetPeerCursor", hub.GetPeerCursor(
+    peer.name,
+    _,
+  ))
   case pull(peer, cursor) {
     Error(reason) -> {
       io.println("reeds: peer " <> peer.name <> " pull failed: " <> reason)
@@ -167,19 +176,17 @@ fn run_pull(state: State) -> health.FeedOutcome {
 
 fn run_push(state: State) -> health.FeedOutcome {
   let peer = state.peer
-  let cursor =
-    process.call(state.hub, waiting: 5000, sending: hub.GetPeerCursor(
-      push_cursor_key(peer),
-      _,
-    ))
-  case
-    process.call(state.hub, waiting: 5000, sending: hub.ReadSince(
-      "*",
-      cursor,
-      push_batch,
-      _,
-    ))
-  {
+  use cursor <- try_local(state, "push", "GetPeerCursor", hub.GetPeerCursor(
+    push_cursor_key(peer),
+    _,
+  ))
+  use read <- try_local(state, "push", "ReadSince", hub.ReadSince(
+    "*",
+    cursor,
+    push_batch,
+    _,
+  ))
+  case read {
     Error(reason) -> health.Unreachable("push", "local read failed: " <> reason)
     Ok(whispers) -> {
       let batch = chunk(whispers, push_body_budget)
@@ -199,6 +206,25 @@ fn run_push(state: State) -> health.FeedOutcome {
           health.Reached("push")
         }
       }
+    }
+  }
+}
+
+/// A hub that misses its deadline is a local fault, reported like any other
+/// `local` failure so the direction backs off and the actor keeps ticking.
+fn try_local(
+  state: State,
+  feed: String,
+  kind: String,
+  make: fn(Subject(reply)) -> hub.Msg,
+  next: fn(reply) -> health.FeedOutcome,
+) -> health.FeedOutcome {
+  case hub_call.call(state.hub, state.timeout_ms, kind, make) {
+    Ok(reply) -> next(reply)
+    Error(failure) -> {
+      let reason = hub_call.describe(failure)
+      io.println("reeds: peer " <> state.peer.name <> ": " <> reason)
+      health.Unreachable(feed, "local " <> reason)
     }
   }
 }
@@ -237,19 +263,31 @@ fn ingest(state: State, whispers: List(Whisper)) -> Result(Int, String) {
   case whispers {
     [] -> Ok(0)
     _ ->
-      process.call(state.hub, waiting: 5000, sending: hub.IngestForeign(
-        whispers,
-        _,
-      ))
+      hub_call.call(
+        state.hub,
+        state.timeout_ms,
+        "IngestForeign",
+        hub.IngestForeign(whispers, _),
+      )
+      |> result.map_error(hub_call.describe)
+      |> result.flatten
   }
 }
 
-fn record_poll(state: State, outcomes: List(health.FeedOutcome)) -> Int {
-  process.call(state.hub, waiting: 5000, sending: hub.RecordPoll(
-    health_name(state.peer),
-    outcomes,
-    _,
-  ))
+fn record_poll(state: State, outcomes: List(health.FeedOutcome)) -> Nil {
+  let recorded =
+    hub_call.call(state.hub, state.timeout_ms, "RecordPoll", hub.RecordPoll(
+      health_name(state.peer),
+      outcomes,
+      _,
+    ))
+  case recorded {
+    Ok(_) -> Nil
+    Error(failure) ->
+      io.println(
+        "reeds: peer " <> state.peer.name <> ": " <> hub_call.describe(failure),
+      )
+  }
 }
 
 /// One read page per tick; `push_body_budget` below is the real bound on

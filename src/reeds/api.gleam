@@ -18,6 +18,7 @@ import mist.{type Connection, type ResponseData}
 import reeds/dashboard
 import reeds/health as health_module
 import reeds/hub
+import reeds/hub_call
 import reeds/state
 import reeds/whisper.{type Whisper}
 import reeds/wire
@@ -38,17 +39,26 @@ pub fn handler(
   hub: Subject(hub.Msg),
   peer_tokens: List(String),
 ) -> fn(Request(Connection)) -> Response(ResponseData) {
+  handler_within(hub, peer_tokens, hub_call.default_timeout_ms)
+}
+
+/// `timeout_ms` is the hub deadline every route answers 503 after.
+pub fn handler_within(
+  hub: Subject(hub.Msg),
+  peer_tokens: List(String),
+  timeout_ms: Int,
+) -> fn(Request(Connection)) -> Response(ResponseData) {
   fn(req) {
     case authorized(req, peer_tokens) {
       False -> error_response(401, "unauthorized")
       True ->
         case request.path_segments(req), req.method {
-          ["health"], Get -> health(hub)
-          ["t", topic], Post -> publish(hub, req, topic)
-          ["t", prefix], Get -> read_since(hub, req, prefix)
+          ["health"], Get -> health(hub, timeout_ms)
+          ["t", topic], Post -> publish(hub, timeout_ms, req, topic)
+          ["t", prefix], Get -> read_since(hub, timeout_ms, req, prefix)
           ["t", prefix, "events"], Get -> sse(hub, req, prefix)
-          ["ingest"], Post -> ingest(hub, req)
-          ["state"], Get -> get_state(hub, req)
+          ["ingest"], Post -> ingest(hub, timeout_ms, req)
+          ["state"], Get -> get_state(hub, timeout_ms, req)
           ["dashboard"], Get -> dashboard_page()
           _, _ -> json_response(404, "{\"error\":\"not found\"}")
         }
@@ -93,15 +103,23 @@ pub fn valid_bearer(
 /// 200 with `ok: false` rather than 5xx when a source is down: the daemon is
 /// answering correctly, it is the upstream that is broken, and a transport
 /// error would tell a caller the wrong thing.
-fn health(hub_subject: Subject(hub.Msg)) -> Response(ResponseData) {
-  case process.call(hub_subject, waiting: 5000, sending: hub.Health) {
-    Error(reason) -> error_response(500, reason)
-    Ok(sources) -> json_response(200, health_module.to_json(sources))
+fn health(hub: Subject(hub.Msg), timeout_ms: Int) -> Response(ResponseData) {
+  case hub_call.call(hub, timeout_ms, "Health", hub.Health) {
+    Error(failure) -> unavailable(failure)
+    Ok(Error(reason)) -> error_response(500, reason)
+    Ok(Ok(sources)) -> json_response(200, health_module.to_json(sources))
   }
+}
+
+/// 503, not 500: the hub is busy rather than broken, and a client that can
+/// tell the two apart knows to retry instead of paging someone.
+fn unavailable(failure: hub_call.Failure) -> Response(ResponseData) {
+  error_response(503, hub_call.describe(failure))
 }
 
 fn publish(
   hub: Subject(hub.Msg),
+  timeout_ms: Int,
   req: Request(Connection),
   topic: String,
 ) -> Response(ResponseData) {
@@ -128,7 +146,7 @@ fn publish(
         Error(reason) -> error_response(400, reason)
         Ok(body) ->
           case
-            process.call(hub, waiting: 5000, sending: hub.Publish(
+            hub_call.call(hub, timeout_ms, "Publish", hub.Publish(
               topic,
               sender,
               kind,
@@ -137,8 +155,9 @@ fn publish(
               _,
             ))
           {
-            Error(reason) -> error_response(500, reason)
-            Ok(seq) ->
+            Error(failure) -> unavailable(failure)
+            Ok(Error(reason)) -> error_response(500, reason)
+            Ok(Ok(seq)) ->
               json_response(201, "{\"seq\":" <> int.to_string(seq) <> "}")
           }
       }
@@ -151,6 +170,7 @@ fn publish(
 /// caller can seed a cursor pull from it.
 fn read_since(
   hub: Subject(hub.Msg),
+  timeout_ms: Int,
   req: Request(Connection),
   prefix: String,
 ) -> Response(ResponseData) {
@@ -158,25 +178,31 @@ fn read_since(
     Ok(last) -> {
       let limit = int.clamp(last, min: 1, max: max_page)
       case
-        process.call(hub, waiting: 5000, sending: hub.ReadLast(prefix, limit, _))
+        hub_call.call(hub, timeout_ms, "ReadLast", hub.ReadLast(
+          prefix,
+          limit,
+          _,
+        ))
       {
-        Error(reason) -> error_response(500, reason)
-        Ok(whispers) -> page_response(whispers, fallback: 0, more: False)
+        Error(failure) -> unavailable(failure)
+        Ok(Error(reason)) -> error_response(500, reason)
+        Ok(Ok(whispers)) -> page_response(whispers, fallback: 0, more: False)
       }
     }
     Error(_) -> {
       let since = query_int(req, "since", 0)
       let limit = int.clamp(query_int(req, "limit", 200), min: 1, max: max_page)
       case
-        process.call(hub, waiting: 5000, sending: hub.ReadSince(
+        hub_call.call(hub, timeout_ms, "ReadSince", hub.ReadSince(
           prefix,
           since,
           limit,
           _,
         ))
       {
-        Error(reason) -> error_response(500, reason)
-        Ok(whispers) ->
+        Error(failure) -> unavailable(failure)
+        Ok(Error(reason)) -> error_response(500, reason)
+        Ok(Ok(whispers)) ->
           page_response(
             whispers,
             fallback: since,
@@ -218,6 +244,7 @@ fn page_response(
 /// its origin_seq was received.
 fn ingest(
   hub: Subject(hub.Msg),
+  timeout_ms: Int,
   req: Request(Connection),
 ) -> Response(ResponseData) {
   let parsed =
@@ -232,10 +259,14 @@ fn ingest(
     Error(reason) -> error_response(400, reason)
     Ok(#(whispers, _next_since, _more)) ->
       case
-        process.call(hub, waiting: 5000, sending: hub.IngestForeign(whispers, _))
+        hub_call.call(hub, timeout_ms, "IngestForeign", hub.IngestForeign(
+          whispers,
+          _,
+        ))
       {
-        Error(reason) -> error_response(500, reason)
-        Ok(accepted) ->
+        Error(failure) -> unavailable(failure)
+        Ok(Error(reason)) -> error_response(500, reason)
+        Ok(Ok(accepted)) ->
           json_response(
             200,
             "{\"accepted\":"
@@ -269,12 +300,14 @@ fn cursors_json(whispers: List(Whisper)) -> String {
 
 fn get_state(
   hub: Subject(hub.Msg),
+  timeout_ms: Int,
   req: Request(Connection),
 ) -> Response(ResponseData) {
   let prefix = query_string(req, "prefix", "*")
-  case process.call(hub, waiting: 5000, sending: hub.ReadState(prefix, _)) {
-    Error(reason) -> error_response(500, reason)
-    Ok(entries) ->
+  case hub_call.call(hub, timeout_ms, "ReadState", hub.ReadState(prefix, _)) {
+    Error(failure) -> unavailable(failure)
+    Ok(Error(reason)) -> error_response(500, reason)
+    Ok(Ok(entries)) ->
       json_response(
         200,
         "{\"entries\":" <> state.list_to_json_string(entries) <> "}",

@@ -56,9 +56,7 @@ pub fn main() {
 
   let assert Ok(_) =
     supervisor.new(supervisor.OneForOne)
-    // Every peer actor calls the hub with a 5s budget and crashes on
-    // timeout; a single slow hub moment killing a few of them must not
-    // take the whole tree past the default 2-in-5s tolerance.
+    // Headroom so a burst of unrelated child crashes does not stop the tree.
     |> supervisor.restart_tolerance(intensity: 10, period: 5)
     |> supervisor.add(hub.supervised(conn, config.bridge_name, hub_name))
     |> list.fold(sources, _, fn(sup, src) {
