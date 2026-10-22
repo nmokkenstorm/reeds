@@ -6,17 +6,23 @@
   <string>dev.mokkenstorm.reeds</string>
   <key>ProgramArguments</key>
   <array>
-    <string>@GLEAM@</string>
+    <string>@INSTALL@/reeds-run</string>
     <string>run</string>
   </array>
   <key>WorkingDirectory</key>
-  <string>@REPO@</string>
+  <string>@HOME@</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
     <string>@PATH@</string>
     <key>HOME</key>
     <string>@HOME@</string>
+    <key>REEDS_CONFIG</key>
+    <string>@HOME@/.config/reeds/config.toml</string>
+    <key>REEDS_LOG</key>
+    <string>@HOME@/Library/Logs/reeds.log</string>
+    <key>REEDS_DB</key>
+    <string>@DB@</string>
   </dict>
   <key>KeepAlive</key>
   <true/>
